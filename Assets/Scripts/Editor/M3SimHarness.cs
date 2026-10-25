@@ -175,6 +175,7 @@ public static class M3SimHarness
                 && (driver.IpAnimProbe == 7 || driver.IpAnimProbe == 8))
                 attentiveTicks++;
 
+
             // C1 窗口：窗口开始后记录 Drop 快照，窗口结束时比对（假脸不应落星）
             if (!c1Armed && scenario.C1StartSec > 0f && now >= scenario.C1StartSec)
             {
@@ -303,6 +304,7 @@ public static class M3SimHarness
         // 2026-10-24：注视期安静陪伴（Attentive/Listening = IdleFly）
         if (attentiveTicks < 10)
             violations.Add($"[注视状态] 注视期 Attentive/Listening 仅 {attentiveTicks} tick（应在 IdleFly 安静陪伴，不再 CompanionIdle 挥手）");
+
 
         Debug.Log($"[SIM] ⏱ {scenario.TotalDuration / 60f:F1} 分钟剧本 / {ticks} tick / 实跑 {sw.Elapsed.TotalSeconds:F1}s");
         Debug.Log($"[SIM] 计数 Voice:Find={cntFind} Fx:Lock={cntLock} Fx:Feedback={cntFb} Gaze:Sustained={cntGaze} Fx:Appear={cntAppear}");

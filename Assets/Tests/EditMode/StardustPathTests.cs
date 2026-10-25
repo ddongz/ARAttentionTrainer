@@ -126,6 +126,41 @@ public class StardustPathTests
     }
 
     [Test]
+    public void AnchoredPath_EndpointsAndDetour()
+    {
+        Vector3 eye = new Vector3(0f, 1.2f, 0f);
+        Vector3 start = new Vector3(0f, 0.25f, 0.55f);
+        Vector3 end = new Vector3(0.4f, 1.35f, 3f);
+        StardustPath.ComputeAnchoredPath(start, end, eye, Vector3.forward, 0f, 0.95f,
+            out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3);
+        Assert.Less(Vector3.Distance(p0, start), 1e-4f, "路径起点必须是视野锚点");
+        Assert.Less(Vector3.Distance(p3, end), 1e-4f, "路径终点必须是老师锚点");
+
+        // 路径中段应绕过孩子（孩子站在原点）：水平距离不小于 0.45m
+        float minD = float.MaxValue;
+        for (int i = 0; i <= 100; i++)
+        {
+            Vector3 p = StardustPath.CubicBezier(p0, c1, c2, p3, i / 100f);
+            minD = Mathf.Min(minD, new Vector2(p.x, p.z).magnitude);
+        }
+        Assert.Greater(minD, 0.45f, "星路不应穿过孩子身体");
+        Assert.Greater(c2.y, 0.3f, "中段控制点应抬离地面，避开桌腿等低矮障碍");
+    }
+
+    [Test]
+    public void StarPath_HiddenAsSoonAsChildSeesTeacher()
+    {
+        Assert.IsTrue(M3DebugDriver.ShouldShowStarPath(true, true, true, false),
+            "引导中、没看到老师 → 星路显示");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, true, true, true),
+            "孩子看到老师（attending）当帧 → 星路必须立刻消失，不等 Guide Success");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, false, true, false),
+            "没有引导 → 不显示星路");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(false, true, true, false),
+            "设置里关掉星路 → 不显示");
+    }
+
+    [Test]
     public void CubicBezier_HitsBothEndpoints()
     {
         var a = new Vector3(-1f, 0.5f, 2f);

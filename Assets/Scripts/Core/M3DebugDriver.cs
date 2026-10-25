@@ -330,6 +330,9 @@ public class M3DebugDriver : MonoBehaviour
             // 注意：_speaking 现在是"有效外界讲话"，状态机不会再把自己的 TTS 当成老师说话
         }
         _prevSpeaking = rawSpeaking;
+        // v9.1（2026-10-25 用户定调）：外界讲话时非语音音效（星星叮/流星雨）压到 20%，
+        //   保留反馈感但不盖住老师；键盘模拟/麦克风降级不做门控，保持原音量。
+        audioPlayer?.SetDuck(!bypassGate && _speaking ? 0.2f : 1f);
 
         // ── 跟踪（选目标 + 头部点 + 滤波）──
         var detections = simMode ? (simDetections ?? EmptyDetections)
@@ -411,10 +414,9 @@ public class M3DebugDriver : MonoBehaviour
             {
                 _logger.LogEvent("GuideStart", _simLooking ? "sim" : "auto");
                 Signal("Fx", "Appear");
-                Signal("Voice", snapshot.valid ? "GuideAppear" : "Find");
+                // 2026-10-25 用户定调：删除状态机的 GuideAppear/Find 自动话术，
+                //   引导语统一交给 GuideDirector 三段式，避免两套话术叠加。
                 audioPlayer?.PlayCue(AudioCue.GuideAppear);
-                // 吸引模式（还没找到人）说"看看老师在哪儿呀"，正常引导说"看这里呀"
-                PlayVoice(snapshot.valid ? VoiceCue.GuideAppear : VoiceCue.Find, VoicePriority.Guide);
                 // 打断矩阵：状态机引导优先于庆典
                 if (_celebrating)
                 {
@@ -551,7 +553,7 @@ public class M3DebugDriver : MonoBehaviour
             // ★2026-10-20 修（用户实测"流星奖励一次都没见过"）：计分条件从"BlazeFace 人脸居中"
             //   放宽为"孩子正在注视老师"（looking：人体框头部点居中 + 检测新鲜）——复用已验证的注视链路，
             //   人脸检测不再阻塞星星奖励（假脸过滤仍保留在 faceCenteredNow 供引导使用）。
-            var sev = _stars.Tick(dt, looking && snapshot.valid);
+            var sev = _stars.Tick(dt, looking && snapshot.valid, snapshot.valid);
             if (sev == StarEvent.StarDropped)
             {
                 int idx = _stars.LitStars - 1;
@@ -637,7 +639,9 @@ public class M3DebugDriver : MonoBehaviour
                     Signal("Voice", "Find"); // 兼容旧断言（I3：丢失后 1.4s 内须有引导语音）
                     PlayVoice(hasStars ? VoiceCue.StarChase : VoiceCue.Confused, VoicePriority.Guide);
                     ipWorldView?.FxPulse("ReGuide");
-                    _guideRepeatT = 0f;
+                    // 2026-10-25：不再设 0——否则同一帧会立刻再喊一句 Lead1，和"老师去哪里了"重叠。
+                    //   重复语音只在 Leading 阶段发；进入 Leading/强化轮时再重置计时。
+                    _guideRepeatT = _guide.Round >= 2 ? 3.5f : 5f;
                     _logger.LogEvent("GuideConfused", hasStars ? "stars" : "teacher");
                     // ★打断矩阵（2026-10-20）：引导优先——立即结束庆典、取消探头/反馈动画
                     if (_celebrating)
@@ -657,16 +661,19 @@ public class M3DebugDriver : MonoBehaviour
                     Signal("Guide", "Found");
                     PlayVoice(hasStars ? VoiceCue.StarLead : VoiceCue.Found, VoicePriority.Guide);
                     ipWorldView?.FxPulse("Lock");
+                    _guideRepeatT = _guide.Round >= 2 ? 3.5f : 5f;
                     Debug.Log("[M3] 引导：找到方向了！（发现）");
                     break;
                 case GuideEvent.EnterLeading:
                     Signal("Guide", $"Lead{_guide.Round}");
-                    _guideRepeatT = 0f;
+                    // 进入带领后完整等一个重复周期再喊"跟我来"，避免紧贴"找到老师了"。
+                    _guideRepeatT = _guide.Round >= 2 ? 3.5f : 5f;
                     Debug.Log($"[M3] 引导：跟我来（第 {_guide.Round} 轮带领）");
                     break;
                 case GuideEvent.RoundUp:
                     Signal("Guide", "RoundUp");
                     ipWorldView?.FxPulse("ReGuide");
+                    _guideRepeatT = _guide.Round >= 2 ? 3.5f : 5f;
                     Debug.Log($"[M3] 引导未跟随 → 强化到第 {_guide.Round} 轮");
                     break;
                 case GuideEvent.EnterSuccess:
@@ -690,9 +697,9 @@ public class M3DebugDriver : MonoBehaviour
 
             if (_guideActive)
             {
-                // 带领语音重复节拍（第 2/3 轮更密）——★仅在孩子仍没看老师时喊：
-                //   孩子一看老师就安静等待跟随确认（用 looking 而不是"老师是否在相机里"）
-                if (!_attending)
+                // 带领语音重复节拍（第 2/3 轮更密）——★仅在 Leading 阶段、孩子仍没看老师时喊：
+                //   Confused/Found 阶段已有各自的一句，不再重复；孩子一看老师就安静等待跟随确认。
+                if (_guide.Phase == GuidePhase.Leading && !_attending)
                 {
                     _guideRepeatT -= dt;
                     if (_guideRepeatT <= 0f)
@@ -723,7 +730,9 @@ public class M3DebugDriver : MonoBehaviour
             // 未建立老师空间锚点时不开（否则终点会退化成精灵自身位置 → 方向错误）
             bool pathOn = settings == null || settings.stardustPathEnabled;
             bool hasAnchor = ipWorldView == null || ipWorldView.HasTeacherAnchor;
-            stardustPath?.SetOn(pathOn && _guideActive && hasAnchor);
+            // 2026-10-25：孩子一看到老师（_attending）就立刻收星路——
+            // 引导导演还要 ~1s 才进 Success，不能让它一直挂在视野里。
+            stardustPath?.SetOn(ShouldShowStarPath(pathOn, _guideActive, hasAnchor, _attending));
         }
         if (ipView != null)
         {
@@ -780,18 +789,25 @@ public class M3DebugDriver : MonoBehaviour
             meteorView.SetRingTarget(teacherPos);
             meteorView.Tick(_now, dt);
         }
-        if (stardustPath != null && stardustPath.IsOn)
+        if (stardustPath != null)
         {
             Vector3 teacherPos = ipWorldView != null ? ipWorldView.CurrentTeacherPos
                                                      : transform.position + transform.forward * 2f;
-            stardustPath.Tick(_now, dt, teacherPos);
-            _pathLogT += dt;
-            if (_pathLogT >= 2f)
+            // teacherValid=已经建立过老师空间锚点（丢失期间 CurrentTeacherPos 保持最后已知位置）
+            bool hasTeacherAnchor = ipWorldView != null && ipWorldView.HasTeacherAnchor;
+            // 即使星路关闭也 Tick：锚点实物标记需要持续显示/更新（调试）
+            stardustPath.Tick(_now, dt, teacherPos, hasTeacherAnchor);
+            if (stardustPath.IsOn)
             {
-                _pathLogT = 0f;
-                _logger?.LogEvent("StarPath", stardustPath.DebugSnapshot());
-                Signal("Path", "Update");
+                _pathLogT += dt;
+                if (_pathLogT >= 2f)
+                {
+                    _pathLogT = 0f;
+                    _logger?.LogEvent("StarPath", stardustPath.DebugSnapshot());
+                    Signal("Path", "Update");
+                }
             }
+            else _pathLogT = 0f;
         }
     }
 
@@ -832,6 +848,10 @@ public class M3DebugDriver : MonoBehaviour
     }
 
     Vector3 IpVoicePos() => ipWorldView != null ? ipWorldView.CurrentWorldPos : transform.position;
+
+    /// <summary>星路显示条件（纯函数）：开启 + 引导中 + 有老师锚点 + 孩子还没看到老师。</summary>
+    public static bool ShouldShowStarPath(bool enabled, bool guideActive, bool hasAnchor, bool attending)
+        => enabled && guideActive && hasAnchor && !attending;
 
     /// <summary>统一语音出口（v9 对话门控）：外界讲话时挂起 Critical/Guide 一条，Ambient 丢弃。</summary>
     void PlayVoice(VoiceCue cue, VoicePriority priority)
@@ -1034,7 +1054,8 @@ public class M3DebugDriver : MonoBehaviour
         if (_guideActive && ipWorldView != null && !_attending)
         {
             Vector2 hint = ipWorldView.TeacherViewportHint();
-            tgt = Vector2.Lerp(tgt, hint, 0.85f);
+            // 2026-10-25：引导时更明显地贴向老师所在视野方向（仍由 hint 的 0.12~0.88 夹紧）。
+            tgt = Vector2.Lerp(tgt, hint, 0.92f);
         }
         // 陪伴换边：方位平滑滑过去（不再左右瞬移）
         _companionSideSmooth = Mathf.SmoothDamp(_companionSideSmooth, _companionSide, ref _companionSideVel, 0.45f, 20f, dt);
@@ -1236,6 +1257,7 @@ public class M3DebugDriver : MonoBehaviour
         _prevListenLogged = -1;
         _hasPendingVoice = false;
         voiceCue?.SetGateAllowed(true);
+        audioPlayer?.SetDuck(1f);
         _firstSearch?.Stop();
         _searchActive = false;
         _searchDiagT = 0f;
@@ -1249,6 +1271,7 @@ public class M3DebugDriver : MonoBehaviour
         _guideActive = false;
         meteorView?.ClearStars();
         stardustPath?.SetOn(false);
+        stardustPath?.ResetAnchors(); // 新会话重新锁定老师锚点（T0：平时不重置）
         Debug.Log($"[M3] 会话已重置：{_logger.SessionDir}");
     }
 

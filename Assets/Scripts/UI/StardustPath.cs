@@ -19,18 +19,26 @@ public class StardustPath : MonoBehaviour
     public Transform eye;             // 观察者（中心眼）
     public MrukBootstrap mruk;        // 可选：房间地板高度（没有则用 eyeHeight 估算）
 
+    [Header("双锚点（2026-10-25 重做）")]
+    [Tooltip("视野锚点：眼前下方多少米（水平）——设在画面底边之外，路从画面外铺进来")]
+    public float startForward = 0.55f;
+    [Tooltip("视野锚点：比眼睛低多少米——大于垂直半 FOV，保证起点在画面外")]
+    public float startDrop = 0.95f;
+    [Tooltip("视野锚点显著移动距离（米）才重算星路")]
+    public float viewAnchorUpdateDistance = 0.25f;
+    [Tooltip("视野锚点显著转角（度）才重算星路")]
+    public float viewAnchorUpdateAngle = 12f;
+    [Tooltip("锚点变化持续这么久才更新（秒）——防抖")]
+    public float anchorUpdateHold = 0.15f;
+
     [Header("几何")]
-    [Tooltip("起点：视野前方多少米（水平距离）")]
-    public float startForward = 0.90f;
-    [Tooltip("起点比眼睛低多少米（保证在垂直视野内看得见路头）")]
-    public float startDrop = 0.65f;
     [Tooltip("绕开孩子所需的最小侧向距离（米）")]
     public float detour = 0.95f;
-    [Tooltip("终点相对老师身体的侧向偏移（米）")]
-    public float endSideOffset = 0.30f;
+    [Tooltip("终点相对老师锚点的侧向偏移（米）")]
+    public float endSideOffset = 0.10f;
     [Tooltip("无房间数据时用于估算地板高度的眼高（米）")]
     public float eyeHeight = 1.5f;
-    [Tooltip("铺路星点数量（密集铺满）")]
+    [Tooltip("铺路星点数量（上限；实际按路长定间距）")]
     public int starDots = 150;
     [Tooltip("星点基准尺寸（米）")]
     public float starDotSize = 0.10f;
@@ -45,18 +53,21 @@ public class StardustPath : MonoBehaviour
     [Tooltip("彗星沿路飞行的速度（归一化/秒）")]
     public float cometSpeed = 0.55f;
     [Tooltip("彗星尺寸（米）")]
-    public float cometSize = 0.30f;
+    public float cometSize = 0.26f;
 
-    [Header("节奏")]
-    [Tooltip("端点/控制点重算间隔（秒）——孩子走动/老师移动时保持正确")]
-    public float updateInterval = 0.1f;
-    [Tooltip("控制点平滑时间（秒）")]
-    public float smoothTime = 0.18f;
+    [Header("节奏/调试")]
     [Tooltip("中心线星点沿路向老师方向流动的速度（归一化/秒）")]
-    public float flowSpeed = 0.20f;
+    public float flowSpeed = 0.08f;
+    [Tooltip("显示两个空间锚点的实物标记（青=老师锚点，洋红=视野锚点）")]
+    public bool showAnchors = true;
+    [Tooltip("锚点标记尺寸（米）")]
+    public float anchorMarkerSize = 0.10f;
 
-    const int MaxDots = 192;      // 120 路径星 + 6 终点星，留余量
-    const int BeaconDots = 6;     // 终点星星柱（老师身侧）
+    const int MaxDots = 192;      // 路径星 + 箭头 + chevron，留余量
+    const int ArrowDots = 7;      // 终点贴地箭头（1 个箭尖 + 3 对翼）
+    const int ChevronCount = 2;   // 沿途 V 形 chevron 数量
+    const int ChevronDots = 5;    // 每个 chevron：1 个尖 + 2 对翼
+    const int ChevronTotal = ChevronCount * ChevronDots;
 
     public bool IsOn { get; private set; }
 
@@ -66,10 +77,10 @@ public class StardustPath : MonoBehaviour
         public Vector3 p0, c1, c2, p3; // 起点/控制1/控制2/终点
     }
 
-    Path _raw, _smooth;
-    readonly Vector3[] _vel = new Vector3[4];
-    bool _hasSmooth, _built;
-    float _nextCalc, _flow, _diagT;
+    Path _path;
+    bool _hasPath, _built;
+    StarPathAnchorLogic _anchors;
+    float _flow, _diagT;
 
     Transform[] _dots;
     MeshRenderer[] _dotR;
@@ -79,17 +90,37 @@ public class StardustPath : MonoBehaviour
     Material _cometMat;
     float _cometT;
 
+    // 中心线 + 锚点实物标记（2026-10-25）
+    LineRenderer _centerLine;
+    Transform _teacherMarker, _viewMarker;
+    LineRenderer _teacherStem, _teacherRing;
+    Material _markerMatCyan, _markerMatMagenta;
+
+    /// <summary>新会话：清空两个锚点，重新锁定老师位置。</summary>
+    public void ResetAnchors()
+    {
+        EnsureAnchors();
+        _anchors.Reset();
+        _hasPath = false;
+        HidePathVisuals();
+    }
+
+    public Vector3 PathStart => _path.p0;
+    public Vector3 PathEnd => _path.p3;
+    public Vector3 TeacherAnchor => _anchors != null && _anchors.HasTeacherAnchor ? _anchors.TeacherAnchor : Vector3.zero;
+    public Vector3 ViewAnchor => _anchors != null && _anchors.HasViewAnchor ? _anchors.ViewAnchor : Vector3.zero;
+
     // 每颗星的确定性伪随机参数（构建时生成，运行时不变）
     float[] _jSide, _jUp, _sMul, _phase, _pick;
 
     // 最近一次的几何（诊断用）
     Vector3 _diagStart, _diagEnd, _diagTeacher;
     float _diagFloorY, _lastHalfWidth;
+    int _diagDots;
 
     void Awake()
     {
         EnsureBuilt();
-        gameObject.SetActive(false);
     }
 
     /// <summary>构建星点（预览工具也会显式调用；幂等）。</summary>
@@ -142,33 +173,137 @@ public class StardustPath : MonoBehaviour
         _cometR.shadowCastingMode = ShadowCastingMode.Off;
         _cometR.receiveShadows = false;
         _cometR.enabled = false;
+
+        EnsureCenterLine(shared);
+        EnsureDebugMarkers();
     }
 
-    /// <summary>开/关星路（驱动层在"引导激活且老师不可见"时打开）。</summary>
+    void EnsureCenterLine(Material shared)
+    {
+        if (_centerLine != null) return;
+        var go = new GameObject("CenterLine");
+        go.transform.SetParent(transform, false);
+        _centerLine = go.AddComponent<LineRenderer>();
+        _centerLine.useWorldSpace = true;
+        _centerLine.positionCount = 0;
+        _centerLine.startWidth = 0.035f;
+        _centerLine.endWidth = 0.035f;
+        _centerLine.numCapVertices = 4;
+        _centerLine.alignment = LineAlignment.View;
+        var mat = new Material(shared != null ? shared.shader : Shader.Find("ARAttention/GuideArrow"));
+        mat.SetTexture("_MainTex", Texture2D.whiteTexture);
+        mat.SetColor("_Color", new Color(1f, 0.93f, 0.68f, 0.55f));
+        _centerLine.sharedMaterial = mat;
+        _centerLine.startColor = new Color(1f, 0.93f, 0.68f, 0.55f);
+        _centerLine.endColor = new Color(1f, 0.97f, 0.82f, 0.85f);
+        _centerLine.shadowCastingMode = ShadowCastingMode.Off;
+        _centerLine.receiveShadows = false;
+        _centerLine.enabled = false;
+    }
+
+    void EnsureDebugMarkers()
+    {
+        if (_teacherMarker != null) return;
+        _markerMatCyan = MakeUnlit(new Color(0.10f, 0.90f, 1.00f, 1f));
+        _markerMatMagenta = MakeUnlit(new Color(1.00f, 0.25f, 0.90f, 1f));
+        _teacherMarker = MakeSphere("AnchorTeacher", _markerMatCyan);
+        _viewMarker = MakeSphere("AnchorView", _markerMatMagenta);
+        _teacherStem = MakeLine("AnchorTeacherStem", _markerMatCyan, 0.012f);
+        _teacherRing = MakeLine("AnchorTeacherRing", _markerMatCyan, 0.012f);
+        _teacherMarker.gameObject.SetActive(false);
+        _viewMarker.gameObject.SetActive(false);
+        _teacherStem.enabled = false;
+        _teacherRing.enabled = false;
+    }
+
+    static Material MakeUnlit(Color c)
+    {
+        // 用项目已打包的 GuideArrow 着色器（starMat 已引用，避免 URP Unlit 被剥离后标记不可见）
+        var sh = Shader.Find("ARAttention/GuideArrow");
+        if (sh == null) sh = Shader.Find("Universal Render Pipeline/Unlit");
+        var m = new Material(sh);
+        m.SetTexture("_MainTex", Texture2D.whiteTexture);
+        m.SetColor("_BaseColor", c);
+        m.SetColor("_Color", c);
+        return m;
+    }
+
+    Transform MakeSphere(string name, Material mat)
+    {
+        var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        go.name = name;
+        go.transform.SetParent(transform, false);
+        Destroy(go.GetComponent<Collider>());
+        var r = go.GetComponent<MeshRenderer>();
+        r.sharedMaterial = mat;
+        r.shadowCastingMode = ShadowCastingMode.Off;
+        r.receiveShadows = false;
+        go.transform.localScale = Vector3.one * anchorMarkerSize;
+        return go.transform;
+    }
+
+    LineRenderer MakeLine(string name, Material mat, float width)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(transform, false);
+        var lr = go.AddComponent<LineRenderer>();
+        lr.useWorldSpace = true;
+        lr.positionCount = 0;
+        lr.startWidth = width;
+        lr.endWidth = width;
+        lr.numCapVertices = 2;
+        lr.alignment = LineAlignment.View;
+        lr.sharedMaterial = mat;
+        lr.startColor = Color.white;
+        lr.endColor = Color.white;
+        lr.shadowCastingMode = ShadowCastingMode.Off;
+        lr.receiveShadows = false;
+        lr.enabled = false;
+        return lr;
+    }
+
+    /// <summary>开/关星路（驱动层在"引导激活且孩子没看老师"时打开）。
+    /// 注意：只隐藏星路本身；两个空间锚点的实物标记仍保持显示（调试用）。</summary>
     public void SetOn(bool on)
     {
         if (IsOn == on) return;
         IsOn = on;
-        gameObject.SetActive(on);
+        EnsureAnchors();
         if (on)
         {
-            _hasSmooth = false;      // 重新出现：直接对齐，不做跨屏滑移
-            _nextCalc = 0f;
+            // 新一轮星路：只换视野锚点（路径起点），**老师锚点保持上次锁定的位置不动**
+            _anchors.ResetView();
+            _hasPath = false;
             _cometT = 0f;
+            _flow = 0f;
+            HidePathVisuals(); // 等锚点建立后再显示，避免旧路残留一帧
         }
-        else
-        {
-            for (int i = 0; i < MaxDots; i++)
-                if (_dotR[i] != null) _dotR[i].enabled = false;
-            if (_cometR != null) _cometR.enabled = false;
-        }
+        else HidePathVisuals();
     }
 
-    /// <summary>驱动层每帧调用。teacherPos=老师世界位置（独立锚点，可丢失后保持）。</summary>
-    public void Tick(float now, float dt, Vector3 teacherPos)
+    void HidePathVisuals()
     {
-        if (!IsOn || eye == null) return;
+        for (int i = 0; i < MaxDots; i++)
+            if (_dotR[i] != null) _dotR[i].enabled = false;
+        if (_cometR != null) _cometR.enabled = false;
+        if (_centerLine != null) _centerLine.enabled = false;
+    }
+
+    void EnsureAnchors()
+    {
+        if (_anchors == null)
+            _anchors = new StarPathAnchorLogic(viewAnchorUpdateDistance,
+                                               viewAnchorUpdateAngle, anchorUpdateHold);
+    }
+
+    /// <summary>驱动层每帧调用。teacherPos=当前/最后已知老师世界位置；
+    /// teacherValid=当前是否检测到老师（首次有效时锁定老师锚点，之后固定）。
+    /// 即使星路关闭也会更新锚点标记（调试用）。</summary>
+    public void Tick(float now, float dt, Vector3 teacherPos, bool teacherValid = true)
+    {
+        if (eye == null) return;
         EnsureBuilt();
+        EnsureAnchors();
         Vector3 eyePos = eye.position;
         Vector3 fwd = eye.forward;
         fwd.y = 0f;
@@ -180,44 +315,66 @@ public class StardustPath : MonoBehaviour
         if (mruk != null && mruk.TryGetRoomBounds(out var room))
             floorY = room.min.y;
 
-        // ── 端点/控制点：节流重算 + 平滑 ──
-        if (now >= _nextCalc || !_hasSmooth)
+        // 星路关闭时：锚点标记仍要显示（调试）。
+        // T0 修复：**不重置锚点**——老师锚点一次锁定后全程不动；
+        // 只有视野锚点按显著性更新（洋红球是路径起点，可以随头动）。
+        if (!IsOn)
         {
-            _nextCalc = now + Mathf.Max(0.02f, updateInterval);
-            ComputePath(eyePos, fwd, floorY, teacherPos,
-                        startForward, startDrop, detour, endSideOffset,
-                        out _raw.p0, out _raw.c1, out _raw.c2, out _raw.p3);
-            _diagStart = _raw.p0;
-            _diagEnd = _raw.p3;
-            _diagTeacher = teacherPos;
-
-            if (!_hasSmooth)
-            {
-                _smooth = _raw; _hasSmooth = true;
-                System.Array.Clear(_vel, 0, _vel.Length);
-            }
-            else
-            {
-                _smooth.p0 = Vector3.SmoothDamp(_smooth.p0, _raw.p0, ref _vel[0], smoothTime);
-                _smooth.c1 = Vector3.SmoothDamp(_smooth.c1, _raw.c1, ref _vel[1], smoothTime);
-                _smooth.c2 = Vector3.SmoothDamp(_smooth.c2, _raw.c2, ref _vel[2], smoothTime);
-                _smooth.p3 = Vector3.SmoothDamp(_smooth.p3, _raw.p3, ref _vel[3], smoothTime);
-            }
+            _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
+            UpdateDebugMarkers(floorY);
+            return;
         }
 
-        // ── 星点：中心线（暖金、密）+ 两侧（淡紫、锥形宽度）──
+        // ── 双锚点：老师锚点固定；视野锚点显著移动才更新 ──
+        _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
+        UpdateDebugMarkers(floorY);
+
+        if (!_anchors.HasTeacherAnchor || !_anchors.HasViewAnchor) return;
+
+        // ── 仅在锚点变化时重算星路（稳定、不随每帧检测抖动）──
+        if (_anchors.Dirty || !_hasPath)
+        {
+            Vector3 start = _anchors.ViewAnchor;
+            Vector3 end = _anchors.TeacherAnchor;
+            Vector3 dir = new Vector3(end.x - start.x, 0f, end.z - start.z);
+            if (dir.sqrMagnitude > 1e-4f)
+            {
+                Vector3 side = Vector3.Cross(Vector3.up, dir.normalized);
+                end += side * endSideOffset;
+            }
+            ComputeAnchoredPath(start, end, eyePos, fwd, floorY, detour,
+                                out _path.p0, out _path.c1, out _path.c2, out _path.p3);
+            // 控制点不要穿墙：限制在 MRUK 房间内（留 0.3m 边距）
+            if (mruk != null && mruk.TryGetRoomBounds(out var roomPath))
+            {
+                _path.c2.x = Mathf.Clamp(_path.c2.x, roomPath.min.x + 0.3f, roomPath.max.x - 0.3f);
+                _path.c2.z = Mathf.Clamp(_path.c2.z, roomPath.min.z + 0.3f, roomPath.max.z - 0.3f);
+            }
+            _diagStart = _path.p0;
+            _diagEnd = _path.p3;
+            // T0：日志里的“老师锚”必须是**锁定的路径锚点**，不是实时低通位置，
+            // 否则会误以为锚点在漂。
+            _diagTeacher = _anchors.TeacherAnchor;
+            _hasPath = true;
+            UpdateCenterLine();
+        }
+
+        // ── 星点：稀疏中心线 + 两条侧轨 + 沿途 chevron + 终点箭头 ──
+        //   2026-10-25：旧版 90 颗中心线星在 2m 路上间距 2cm，0.15m 的柔光星全部叠在一起
+        //   → 真机是一团发光的"虫"。现在按路长定间距（中心线 0.18m / 侧轨 0.16m），
+        //   单颗星能被看清；方向主要靠 2 个 chevron + 终点箭头 + 彗星。
         _flow = Mathf.Repeat(_flow + flowSpeed * dt, 1f);
-        int n = Mathf.Clamp(starDots, 0, MaxDots - BeaconDots);
-        float pathLen = Vector3.Distance(_smooth.p0, _smooth.p3);
+        int n = Mathf.Clamp(starDots, 0, MaxDots - ArrowDots - ChevronTotal);
+        float pathLen = Vector3.Distance(_path.p0, _path.p3);
         float halfWidth = RoadHalfWidthFor(pathLen, roadHalfWidth);
         _diagFloorY = floorY;
         _lastHalfWidth = halfWidth;
-        int centerCount = Mathf.Clamp(Mathf.RoundToInt(n * centerlineFraction), 0, n);
-        int railCount = n - centerCount;
-        int leftCount = railCount / 2;
-        int rightCount = railCount - leftCount;
+        int maxCenter = Mathf.Max(4, Mathf.RoundToInt(n * centerlineFraction));
+        int centerCount = Mathf.Clamp(Mathf.RoundToInt(pathLen / 0.18f), 4, maxCenter);
+        int railPerSide = Mathf.Clamp(Mathf.RoundToInt(pathLen / 0.16f), 4,
+                                      Mathf.Max(4, (n - centerCount) / 2));
 
-        // 中心线：暖金、密、亮——这是"路"的主脊
+        // 中心线：暖金、亮——"路"的主脊（间距 ≥0.18m，颗颗可辨）
         for (int i = 0; i < centerCount; i++)
         {
             float t = Mathf.Repeat((i + 0.5f) / Mathf.Max(1, centerCount) + _flow, 1f);
@@ -226,59 +383,119 @@ public class StardustPath : MonoBehaviour
             p += Vector3.up * (0.03f + _jUp[i] * 0.06f);
             float fade = Mathf.Clamp01(t / 0.05f) * Mathf.Clamp01((1f - t) / 0.08f);
             float tw = 0.65f + 0.35f * Mathf.Sin(now * (2.2f + 2.4f * _phase[i]) + _phase[i]);
-            float size = starDotSize * 1.50f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
-            PlaceDot(i, p, size, fade * (0.85f + 0.15f * tw), ColorFor(0.10f));
+            float size = starDotSize * 1.15f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
+            PlaceDot(i, p, size, fade * (0.82f + 0.18f * tw), ColorFor(0.10f));
         }
 
         // 两条侧轨：淡紫、暗、固定在锥形宽度边缘——给出"路面"宽度但不糊住中心
-        for (int j = 0; j < leftCount; j++)
+        for (int j = 0; j < railPerSide; j++)
         {
             int i = centerCount + j;
-            float t = Mathf.Repeat((j + 0.5f) / Mathf.Max(1, leftCount) + _flow, 1f);
+            float t = Mathf.Repeat((j + 0.5f) / Mathf.Max(1, railPerSide) + _flow, 1f);
             SamplePath(t, fwd, out Vector3 p, out Vector3 side);
             float width = halfWidth * Mathf.Lerp(1f, taper, t);
             p += side * (-width * (0.90f + 0.10f * _jSide[i]));
             p += Vector3.up * (0.03f + _jUp[i] * 0.08f);
             float fade = Mathf.Clamp01(t / 0.05f) * Mathf.Clamp01((1f - t) / 0.08f);
             float tw = 0.62f + 0.38f * Mathf.Sin(now * (2.2f + 2.4f * _phase[i]) + _phase[i]);
-            float size = starDotSize * 0.70f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
-            PlaceDot(i, p, size, fade * (0.42f + 0.16f * tw), ColorFor(0.80f));
+            float size = starDotSize * 0.60f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
+            PlaceDot(i, p, size, fade * (0.35f + 0.15f * tw), ColorFor(0.80f));
         }
-        for (int j = 0; j < rightCount; j++)
+        for (int j = 0; j < railPerSide; j++)
         {
-            int i = centerCount + leftCount + j;
-            float t = Mathf.Repeat((j + 0.5f) / Mathf.Max(1, rightCount) + _flow, 1f);
+            int i = centerCount + railPerSide + j;
+            float t = Mathf.Repeat((j + 0.5f) / Mathf.Max(1, railPerSide) + _flow, 1f);
             SamplePath(t, fwd, out Vector3 p, out Vector3 side);
             float width = halfWidth * Mathf.Lerp(1f, taper, t);
             p += side * (width * (0.90f + 0.10f * _jSide[i]));
             p += Vector3.up * (0.03f + _jUp[i] * 0.08f);
             float fade = Mathf.Clamp01(t / 0.05f) * Mathf.Clamp01((1f - t) / 0.08f);
             float tw = 0.62f + 0.38f * Mathf.Sin(now * (2.2f + 2.4f * _phase[i]) + _phase[i]);
-            float size = starDotSize * 0.70f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
-            PlaceDot(i, p, size, fade * (0.42f + 0.16f * tw), ColorFor(0.80f));
+            float size = starDotSize * 0.60f * _sMul[i] * (0.85f + 0.15f * tw) * fade;
+            PlaceDot(i, p, size, fade * (0.35f + 0.15f * tw), ColorFor(0.80f));
         }
 
-        // ── 终点星星柱：老师身侧 0.15~1.0m 高度，明确"路通向这里" ──
-        Vector3 endSide = Vector3.Cross(Vector3.up, (_smooth.p3 - _smooth.p0)).normalized;
-        for (int k = 0; k < BeaconDots; k++)
+        int chevronBase = centerCount + railPerSide * 2;
+        bool showChevrons = pathLen >= 1.2f;
+        if (showChevrons)
         {
-            int i = n + k;
-            float h = 0.18f + k * 0.15f;
-            Vector3 p = _smooth.p3 + endSide * 0.10f + Vector3.up * h;
-            float tw = 0.65f + 0.35f * Mathf.Sin(now * 2.7f + k * 1.4f);
-            float size = starDotSize * (1.25f - 0.06f * k) * (0.9f + 0.1f * tw);
-            PlaceDot(i, p, size, 0.85f * tw, ColorFor(0.15f + 0.1f * k));
+            // 沿途 2 个 V 形 chevron（5 颗星/个），指向老师，强化"往这边走"
+            for (int c = 0; c < ChevronCount; c++)
+            {
+                float tc = Mathf.Clamp01(0.42f + c * 0.26f);
+                SamplePath(tc, fwd, out Vector3 cp, out Vector3 cside);
+                Vector3 tan = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3,
+                                          Mathf.Min(1f, tc + 0.01f))
+                            - CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3,
+                                          Mathf.Max(0f, tc - 0.01f));
+                if (tan.sqrMagnitude < 1e-6f) tan = fwd;
+                tan.Normalize();
+                Vector3 backC = -tan;
+                int baseI = chevronBase + c * ChevronDots;
+                Vector3 tip = cp + Vector3.up * 0.04f;
+                float tw0 = 0.7f + 0.3f * Mathf.Sin(now * 2.4f + c * 1.7f);
+                PlaceDot(baseI, tip, starDotSize * 0.95f, 0.8f * tw0, ColorFor(0.05f));
+                for (int k = 1; k < ChevronDots; k++)
+                {
+                    int wing = ((k - 1) & 1) == 0 ? -1 : 1;
+                    int row = (k - 1) / 2;                 // 0..1
+                    float along = 0.14f + row * 0.15f;
+                    float across = 0.09f + row * 0.09f;
+                    Vector3 p = tip + backC * along + cside * (wing * across);
+                    float tw = 0.7f + 0.3f * Mathf.Sin(now * 2.4f + k * 1.3f);
+                    PlaceDot(baseI + k, p, starDotSize * (0.85f - row * 0.05f), 0.72f * tw, ColorFor(0.08f));
+                }
+            }
+        }
+
+        // ── 终点贴地箭头：路尾一枚 V 形箭头，明确"往老师脚下走" ──
+        //   2026-10-25：旧版是 6 颗竖排星柱（0.18~0.93m），真机看起来像"一排竖向星星"；
+        //   改成贴地箭头（1 个箭尖 + 3 对翼），既指方向又不挡老师。
+        {
+            Vector3 tip = _path.p3;
+            Vector3 back = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3, 0.90f) - tip;
+            if (back.sqrMagnitude < 1e-6f) back = -fwd;
+            back.Normalize();
+            Vector3 side = Vector3.Cross(Vector3.up, back);
+            if (side.sqrMagnitude < 1e-6f) side = Vector3.Cross(Vector3.up, fwd);
+            side.Normalize();
+            int arrowBase = chevronBase + (showChevrons ? ChevronTotal : 0);
+            for (int k = 0; k < ArrowDots; k++)
+            {
+                int i = arrowBase + k;
+                Vector3 p;
+                float sizeMul;
+                if (k == 0)
+                {
+                    p = tip + Vector3.up * 0.04f;
+                    sizeMul = 1.30f; // 箭尖
+                }
+                else
+                {
+                    int wing = ((k - 1) & 1) == 0 ? -1 : 1;
+                    int row = (k - 1) / 2;              // 0..2
+                    float along = 0.16f + row * 0.16f;  // 从箭尖向回铺
+                    float across = 0.09f + row * 0.11f; // 翼展逐渐变宽
+                    p = tip + back * along + side * (wing * across);
+                    sizeMul = 1.05f - row * 0.08f;
+                }
+                float tw = 0.65f + 0.35f * Mathf.Sin(now * 2.7f + k * 1.4f);
+                float size = starDotSize * sizeMul * (0.9f + 0.1f * tw);
+                PlaceDot(i, p, size, 0.95f * tw, ColorFor(0.05f));
+            }
         }
 
         // 其余的星隐藏（数量下调时）
-        for (int i = n + BeaconDots; i < MaxDots; i++)
+        int used = chevronBase + (showChevrons ? ChevronTotal : 0) + ArrowDots;
+        _diagDots = used;
+        for (int i = used; i < MaxDots; i++)
             if (_dotR[i] != null) _dotR[i].enabled = false;
 
         // ── 指路彗星：沿中心线飞向老师，方向感的主视觉 ──
         if (_comet != null && _cometR != null)
         {
             _cometT = Mathf.Repeat(_cometT + cometSpeed * dt, 1f);
-            Vector3 cp = CubicBezier(_smooth.p0, _smooth.c1, _smooth.c2, _smooth.p3, _cometT);
+            Vector3 cp = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3, _cometT);
             _comet.position = cp;
             _comet.rotation = Quaternion.LookRotation(cp - eye.position, Vector3.up);
             _comet.localScale = Vector3.one * (cometSize * (0.9f + 0.1f * Mathf.Sin(now * 6f)));
@@ -297,20 +514,107 @@ public class StardustPath : MonoBehaviour
             Debug.Log($"[Stardust] 起点={_diagStart.ToString("F2")} 终点={_diagEnd.ToString("F2")} " +
                       $"路长={Vector3.Distance(_diagStart, _diagEnd):F2}m 半宽={halfWidth:F2}m " +
                       $"老师锚={_diagTeacher.ToString("F2")} 眼={eyePos.ToString("F2")} " +
-                      $"老师方位角={ang:F0}° 地板Y={floorY:F2} 星点={n}+{BeaconDots}");
+                      $"老师方位角={ang:F0}° 地板Y={floorY:F2} 星点={n}+{ArrowDots}");
         }
     }
 
     void SamplePath(float t, Vector3 fwd, out Vector3 p, out Vector3 side)
     {
-        p = CubicBezier(_smooth.p0, _smooth.c1, _smooth.c2, _smooth.p3, t);
-        Vector3 tangent = CubicBezier(_smooth.p0, _smooth.c1, _smooth.c2, _smooth.p3,
+        p = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3, t);
+        Vector3 tangent = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3,
                                       Mathf.Min(1f, t + 0.012f))
-                        - CubicBezier(_smooth.p0, _smooth.c1, _smooth.c2, _smooth.p3,
+                        - CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3,
                                       Mathf.Max(0f, t - 0.012f));
         side = Vector3.Cross(tangent, Vector3.up);
         if (side.sqrMagnitude < 1e-6f) side = Vector3.Cross(fwd, Vector3.up);
         side.Normalize();
+    }
+
+    /// <summary>双锚点星路几何（纯函数）：start=视野锚点（画面外前下方），end=老师锚点。
+    /// 路径从画面外进入、绕过孩子身体，升到老师锚点；控制点抬高到桌面以上，避开低矮障碍。</summary>
+    public static void ComputeAnchoredPath(Vector3 start, Vector3 end, Vector3 eyePos, Vector3 eyeForward,
+                                           float floorY, float detour,
+                                           out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3)
+    {
+        p0 = start;
+        p3 = end;
+        Vector3 fwd = new Vector3(eyeForward.x, 0f, eyeForward.z);
+        if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
+        fwd.Normalize();
+
+        Vector3 startFlat = new Vector3(start.x, floorY, start.z);
+        Vector3 endFlat = new Vector3(end.x, floorY, end.z);
+        Vector3 dir = endFlat - startFlat;
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 1e-4f) dir = fwd;
+        dir.Normalize();
+        Vector3 side = Vector3.Cross(Vector3.up, dir);
+        if (side.sqrMagnitude < 1e-6f) side = Vector3.Cross(Vector3.up, fwd);
+        side.Normalize();
+
+        Vector3 child = new Vector3(eyePos.x, floorY, eyePos.z);
+        float sideDot = Vector3.Dot(side, child - startFlat);
+        float sign = sideDot > 0f ? -1f : 1f;
+        bool behind = Vector3.Dot(fwd, new Vector3(end.x - eyePos.x, 0f, end.z - eyePos.z)) < 0.15f;
+        float lateral = behind ? Mathf.Max(2.2f, detour * 2.4f) : Mathf.Max(detour, 0.9f);
+
+        Vector3 mid = (startFlat + endFlat) * 0.5f;
+        c2 = mid + side * (sign * lateral);
+        // 中段抬到桌面以上（0.60m），避免从课桌/椅子中穿过
+        c2.y = Mathf.Lerp(floorY + 0.60f, end.y, 0.35f);
+        // 第一控制点把"画面外"的路头拉进画面
+        c1 = Vector3.Lerp(p0, c2, 0.30f) + Vector3.up * 0.25f;
+        c1.y = Mathf.Max(c1.y, floorY + 0.15f);
+    }
+
+    void UpdateCenterLine()
+    {
+        if (_centerLine == null) return;
+        const int N = 33;
+        _centerLine.positionCount = N;
+        for (int i = 0; i < N; i++)
+        {
+            float t = i / (N - 1f);
+            _centerLine.SetPosition(i,
+                CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3, t) + Vector3.up * 0.02f);
+        }
+        _centerLine.enabled = IsOn;
+    }
+
+    void UpdateDebugMarkers(float floorY)
+    {
+        if (_teacherMarker == null) return;
+        bool show = showAnchors && _anchors != null;
+
+        bool t = show && _anchors.HasTeacherAnchor;
+        _teacherMarker.gameObject.SetActive(t);
+        if (_teacherStem != null) _teacherStem.enabled = t;
+        if (_teacherRing != null) _teacherRing.enabled = t;
+        if (t)
+        {
+            Vector3 p = _anchors.TeacherAnchor;
+            _teacherMarker.position = p;
+            _teacherMarker.localScale = Vector3.one * anchorMarkerSize;
+            _teacherStem.positionCount = 2;
+            _teacherStem.SetPosition(0, p);
+            _teacherStem.SetPosition(1, new Vector3(p.x, floorY + 0.02f, p.z));
+            const int RN = 25;
+            _teacherRing.positionCount = RN;
+            for (int i = 0; i < RN; i++)
+            {
+                float a = i / (RN - 1f) * Mathf.PI * 2f;
+                _teacherRing.SetPosition(i,
+                    new Vector3(p.x + Mathf.Cos(a) * 0.25f, floorY + 0.03f, p.z + Mathf.Sin(a) * 0.25f));
+            }
+        }
+
+        bool v = show && _anchors.HasViewAnchor;
+        _viewMarker.gameObject.SetActive(v);
+        if (v)
+        {
+            _viewMarker.position = _anchors.ViewAnchor;
+            _viewMarker.localScale = Vector3.one * anchorMarkerSize;
+        }
     }
 
     void PlaceDot(int i, Vector3 pos, float size, float alpha, Color col)
@@ -363,7 +667,7 @@ public class StardustPath : MonoBehaviour
         Vector3 e = eye != null ? eye.position : Vector3.zero;
         Vector3 f = eye != null ? eye.forward : Vector3.forward;
         return FormatSnapshot(_diagStart, _diagEnd, _diagTeacher, e, f,
-                              _diagFloorY, _lastHalfWidth, starDots + BeaconDots);
+                              _diagFloorY, _lastHalfWidth, _diagDots);
     }
 
     /// <summary>路面半宽随路长收缩（纯函数，供单测）：短路若保持 1m 宽会变成"一团星星"。</summary>
@@ -409,6 +713,8 @@ public class StardustPath : MonoBehaviour
         Vector3 endSide = Vector3.Cross(Vector3.up, dirT).normalized;
         // 站在老师哪一侧：取离孩子更远的一侧，避免路尾贴着孩子
         if (Vector3.Dot(endSide, eyePos - teacherPos) > 0f) endSide = -endSide;
+        // 路尾：老师脚下地面投影（v9.2 试过升到老师身前，预览里变成"竖排星星"，已回退）。
+        //   用贴地箭头 + 彗星表达方向；路本身仍铺在地面上。
         p3 = new Vector3(teacherPos.x, floorY + 0.05f, teacherPos.z) + endSide * endSideOffset;
 
         bool behind = Vector3.Dot(fwd, dirT) < 0.15f; // 老师侧后方/正后方

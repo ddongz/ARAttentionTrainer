@@ -102,6 +102,29 @@ public class MeteorLogicTests
     }
 
     [Test]
+    public void StarProgress_TeacherOutOfViewClearsQuickly()
+    {
+        var s = new StarProgressLogic(2.5f, 8, 8f, 15f, 0.5f);
+        for (int i = 0; i < 80; i++) s.Tick(1f / 30f, true, true); // 2.67s → 1 颗
+        Assert.AreEqual(1, s.LitStars);
+
+        // 老师在画面内、孩子移开 2s：星星保留（只增不减）
+        for (int i = 0; i < 60; i++) s.Tick(1f / 30f, false, true);
+        Assert.AreEqual(1, s.LitStars, "老师仍在画面时走神不应清空");
+
+        // 老师出视野 0.4s：短暂检测丢失，仍保留
+        for (int i = 0; i < 12; i++) s.Tick(1f / 30f, false, false);
+        Assert.AreEqual(1, s.LitStars, "出视野不足 0.5s 不应清空");
+
+        // 超过 0.5s：清空并重置
+        bool cleared = false;
+        for (int i = 0; i < 6; i++)
+            if (s.Tick(1f / 30f, false, false) == StarEvent.Cleared) cleared = true;
+        Assert.IsTrue(cleared, "老师出视野 0.5s 应清空星环");
+        Assert.AreEqual(0, s.LitStars);
+    }
+
+    [Test]
     public void StarProgress_LongAbsenceClearsRing()
     {
         var s = MakeStars();

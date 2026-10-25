@@ -228,6 +228,8 @@ public class IPWorldView : MonoBehaviour
     // 老师独立锚点：路标模式下精灵飞走了，老师的方位要单独记住
     Vector3 _teacherPos;
     bool _hasTeacherPos;
+    float _lastDistByHeight, _lastRayHit, _lastChosenDist;
+    bool _lastHadRayHit;
 
     // 锚点（离散重建）与渲染位置（连续追赶）
     bool _hasWorldPos;
@@ -383,6 +385,10 @@ public class IPWorldView : MonoBehaviour
             // ★2026-10-21 修：环境射线可能打到课桌/墙（真机日志：0.55m），
             //   把老师锚点拉到 0.75m → 星路只有 0.44m 长，视觉上"一团星星"。
             dist = ResolveTargetDistance(distByHeight, dHit, hasHit, height01);
+            _lastDistByHeight = distByHeight;
+            _lastRayHit = dHit;
+            _lastHadRayHit = hasHit;
+            _lastChosenDist = dist;
 
             Vector3 right = frame.cameraPose.rotation * Vector3.right;
             Vector3 up = frame.cameraPose.rotation * Vector3.up;
@@ -519,11 +525,11 @@ public class IPWorldView : MonoBehaviour
             if (_stick != null) _stick.SetVisuals(visual, alpha, tint); // 火柴人：姿态+透明度全平滑
             DriveAnimator(visual);
 
-            // "找老师"指向手势：周期触发 Point（找老师期间每次约 2.8s 一次）
+            // "找老师"指向手势：周期触发 Point（2026-10-25：2.8s → 2.2s，指向更明显）
             if (animator != null && pointing && Time.time >= _nextPoint)
             {
                 animator.SetTrigger("Point");
-                _nextPoint = Time.time + 2.8f;
+                _nextPoint = Time.time + 2.2f;
             }
         }
 
@@ -535,7 +541,10 @@ public class IPWorldView : MonoBehaviour
                 ? $"房间[{rb.min.ToString("F1")}~{rb.max.ToString("F1")}]" : "无房间数据";
             Debug.Log($"[IP] vis={visible} alpha={alpha:F2} scale={scale:F2} 锚={_lastWorldPos.ToString("F2")} " +
                       $"渲染={_renderWorldPos.ToString("F2")} tgt有效={targetValid} 重建距={Vector3.Distance(_lastWorldPos, _renderWorldPos):F3}m " +
-                      $"camPos={frame.cameraPose.position.ToString("F2")} height01={height01:F3} {roomInfo}");
+                      $"camPos={frame.cameraPose.position.ToString("F2")} height01={height01:F3} {roomInfo} | " +
+                      $"老师实时={_teacherPos.ToString("F2")} target=({targetX01:F2},{targetY01:F2}) " +
+                      $"distH={_lastDistByHeight:F2} ray={(_lastHadRayHit ? _lastRayHit.ToString("F2") : "miss")} " +
+                      $"chosen={_lastChosenDist:F2} focal={frame.focalLengthPx:F0}");
         }
     }
 

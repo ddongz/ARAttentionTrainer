@@ -56,6 +56,7 @@ public static class StardustPreview
             sd.starMat = mat;
             sd.eye = camGO.transform;
             sd.eyeHeight = 1.6f; // 地板 y=0
+            sd.showAnchors = false; // 预览图里不要锚点球
             sd.EnsureBuilt();
 
             var cases = new (string name, Vector3 teacher)[]
@@ -83,14 +84,15 @@ public static class StardustPreview
                 sd.SetOn(false);
                 sd.SetOn(true);
                 float t = 0f;
-                for (int i = 0; i < 40; i++) { t += 1f / 30f; sd.Tick(t, 1f / 30f, c.teacher); }
+                for (int i = 0; i < 40; i++) { t += 1f / 30f; sd.Tick(t, 1f / 30f, c.teacher, true); }
                 Shot(cam, Path.Combine(OutDir, c.name + ".png"));
 
                 // 几何诊断：路径中心线到孩子的最近水平距离（越小越可能穿身）
                 float minD = float.MaxValue, minT = 0f;
                 Vector3 p0 = default, c1 = default, c2 = default, p3 = default;
-                StardustPath.ComputePath(new Vector3(0f, 1.6f, 0f), Vector3.forward, 0f, c.teacher,
-                    0.90f, 0.65f, 0.95f, 0.3f, out p0, out c1, out c2, out p3);
+                StardustPath.ComputeAnchoredPath(sd.ViewAnchor, sd.TeacherAnchor,
+                    new Vector3(0f, 1.6f, 0f), Vector3.forward, 0f, sd.detour,
+                    out p0, out c1, out c2, out p3);
                 for (int i = 0; i <= 100; i++)
                 {
                     Vector3 p = StardustPath.CubicBezier(p0, c1, c2, p3, i / 100f);

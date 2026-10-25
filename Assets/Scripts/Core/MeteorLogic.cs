@@ -65,39 +65,56 @@ public class StarProgressLogic
     float _sinceStar;     // 当前这颗星的注视累计
     float _cooldown;
     float _notLookingT;   // 连续未注视时长（用于清空判定）
+    float _notVisibleT;   // 老师连续不在画面内的时长（0.5s 后清空星环）
 
     readonly float _cooldownSeconds;
     readonly float _clearAfterSeconds;
+    readonly float _clearWhenInvisibleSeconds;
 
     public StarProgressLogic(float perStarSeconds = 2.5f, int starsPerRing = 8,
-                             float cooldownSeconds = 8f, float clearAfterSeconds = 15f)
+                             float cooldownSeconds = 8f, float clearAfterSeconds = 15f,
+                             float clearWhenInvisibleSeconds = 0.5f)
     {
         PerStarSeconds = Mathf.Max(0.2f, perStarSeconds);
         StarsPerRing = Mathf.Max(1, starsPerRing);
         _cooldownSeconds = Mathf.Max(0f, cooldownSeconds);
         _clearAfterSeconds = Mathf.Max(1f, clearAfterSeconds);
+        _clearWhenInvisibleSeconds = Mathf.Max(0.1f, clearWhenInvisibleSeconds);
     }
 
     public void Reset()
     {
-        LitStars = 0; _sinceStar = 0f; _cooldown = 0f; _notLookingT = 0f;
+        LitStars = 0; _sinceStar = 0f; _cooldown = 0f; _notLookingT = 0f; _notVisibleT = 0f;
     }
 
-    /// <summary>每帧推进。lookingAtTeacher=人脸居中且属于人体（假脸已过滤）。</summary>
-    public StarEvent Tick(float dt, bool lookingAtTeacher)
+    /// <summary>每帧推进。lookingAtTeacher=孩子正在注视老师（检测新鲜 + 视线居中）；
+    /// teacherVisible=老师仍在画面内（targetValid）。老师出画面超过 0.5s → 星环立即清空；
+    /// 只是孩子移开视线、老师仍在画面内 → 星星保留（只增不减）。</summary>
+    public StarEvent Tick(float dt, bool lookingAtTeacher, bool teacherVisible = true)
     {
         if (_cooldown > 0f)
         {
             _cooldown = Mathf.Max(0f, _cooldown - dt);
             return StarEvent.None;
         }
+        if (!teacherVisible)
+        {
+            _notVisibleT += dt;
+            if (_notVisibleT >= _clearWhenInvisibleSeconds && LitStars > 0)
+            {
+                Reset();
+                return StarEvent.Cleared; // 老师出视野 → 星环消失并重置
+            }
+            return StarEvent.None;
+        }
+        _notVisibleT = 0f;
         if (!lookingAtTeacher)
         {
             _notLookingT += dt;
             if (_notLookingT >= _clearAfterSeconds && LitStars > 0)
             {
                 Reset();
-                return StarEvent.Cleared; // 老师长时间不在 → 星环清空（重新开始）
+                return StarEvent.Cleared; // 老师长时间在画面内但孩子一直没看 → 星环清空（重新开始）
             }
             return StarEvent.None;        // 走神：不推进、不衰减（星星只增不减）
         }

@@ -15,6 +15,7 @@ public class AudioCuePlayer : MonoBehaviour
     [Range(0f, 1f)] public float spatialBlend = 0f;
 
     AudioSource _source;
+    float _duck = 1f;   // 对话门控：外界讲话时把音效压低（0.2），避免盖住老师
     /// <summary>音效是否正在播放（对话门控的自音频输入）。</summary>
     public bool IsPlaying => _source != null && _source.isPlaying;
     AudioClip _guide, _hide, _feedback, _celebrate;
@@ -28,7 +29,7 @@ public class AudioCuePlayer : MonoBehaviour
     {
         _source = gameObject.AddComponent<AudioSource>();
         _source.playOnAwake = false;
-        _source.volume = volume;
+        _source.volume = volume * _duck;
         _source.spatialBlend = spatialBlend;
         _source.spatialize = spatialBlend > 0f;
 
@@ -87,7 +88,19 @@ public class AudioCuePlayer : MonoBehaviour
     public void SetVolume(float v)
     {
         volume = Mathf.Clamp01(v);
-        if (_source != null) _source.volume = volume;
+        ApplyVolume();
+    }
+
+    /// <summary>对话门控压低系数：外界讲话时 0.2，安静时 1.0。</summary>
+    public void SetDuck(float factor)
+    {
+        _duck = Mathf.Clamp01(factor);
+        ApplyVolume();
+    }
+
+    void ApplyVolume()
+    {
+        if (_source != null) _source.volume = volume * _duck;
     }
 
     /// <summary>把一串 (频率, 时长) 合成为一个音频片段；每段带 20ms 淡入淡出防爆音。</summary>

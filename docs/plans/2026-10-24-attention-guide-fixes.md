@@ -711,3 +711,75 @@ LATEST=$("$ADB" shell "ls -dt $SESS/* | head -1" | tr -d '\r')
 - Task 7：需求文档已写（`docs/specs/2026-10-24-listen-animation-requirements.md`），
   等建模师交付 `Listen` Action；当前 `IdleFly + Curious` 回退已生效。
 - Task 8：构建/安装见本轮操作；真机测试结果待补。
+
+## 追加修复（2026-10-25，v9.1 真机第二轮反馈）
+
+用户真机测试后新增 3 个现象 + 3 条建议，已按用户拍板实现：
+
+1. **看到老师星路不立刻消失**：`M3DebugDriver.ShouldShowStarPath(...)` 增加 `!attending`；
+   孩子看到老师当帧关闭（旧版要等 Guide Success 的 1s）。新增单测。
+2. **老师出视野星环不消失/不重置**：`StarProgressLogic.Tick(dt, looking, teacherVisible)`；
+   老师不可见 0.5s → `Reset + Cleared`（星环隐藏、星数清零）；
+   孩子只是移开视线、老师仍在画面内时保留星星（B1' 语义不变）。新增单测。
+3. **视野里一排竖向星星**：删除 `StardustPath` 的 6 颗竖直“终点星柱”，
+   改为贴地 V 形箭头（1 箭尖 + 3 对翼，7 颗星点）；终点侧偏 0.30 → 0.10m，
+   铺到老师脚下。`Device.unity` 的 `endSideOffset` 同步改为 0.1。
+   同时把中心线/侧轨从固定 90/60 颗改为**按路长定间距**（中心线 0.18m、侧轨 0.16m），
+   2m 路约 11 颗中心线星，解决“星星叠成一团发光虫”；沿途再加 2 个 V 形 chevron
+   （5 颗/个）强化方向。`flowSpeed` 0.20→0.08、`cometSize` 0.30→0.26。
+4. **话术合并**：删除状态机 `GuideAppear/Find` 自动播放，只保留引导导演三段式。
+5. **重复语音计时**：仅在 `Leading` 阶段重复；进入 Confused/Found/Leading/RoundUp
+   重置 5s/3.5s 计时，修复“Confused 与 Lead1 同帧”“Found 后 0.07s 又 Lead2”。
+6. **非语音音效避让**：`AudioCuePlayer.SetDuck()`；外界讲话时音效降到 20%，
+   安静时恢复 100%。
+7. **精灵指向更明显**：引导时视野偏移权重 0.85 → 0.92，`Point` 手势间隔 2.8 → 2.2s。
+
+验证：EditMode **119/119**；模拟机 20.2 分钟 × 3 种子全绿；
+`Voice:Played` 199 → 140（去掉冗余出场句/同帧重复），讲话中播放仍为 0。
+
+## 星路双锚点重做（2026-10-25 晚，用户要求）
+
+用户实测后认为星路“没有正确指向老师、没有延申出视野”，要求完全重做：
+**老师位置放一个空间锚点（默认不动）；视野前方放一个空间锚点（路径起点）；
+两个锚点生成星路；视野移动显著后才更新星路；锚点用实物标出来调试。**
+（特别澄清：老师锚点固定，只有视野锚点会动。）
+
+实现：
+
+- 新增 `StarPathAnchorLogic`（纯逻辑 + 4 个单测）：
+  - 老师锚点 = 第一次有效检测到的老师位置，之后**固定**；丢失时保持；
+  - 视野锚点 = `eye + forward×0.55m - up×0.95m`（画面底边之外），
+    移动 >0.25m 或转角 >12° 且持续 0.15s 才更新；
+  - 每次星路开启（`SetOn(true)`）重置锚点，老师锚点取当前/最后已知位置。
+- `StardustPath` 重写：
+  - 取消每 0.1s 的平滑重算；只在锚点更新时重算贝塞尔路径；
+  - `ComputeAnchoredPath`：起点=视野锚点（画面外），终点=老师锚点（3D，头部），
+    中段控制点绕开孩子并抬到桌面以上（0.60m），支持老师位于身后的大绕行；
+    控制点再用 MRUK 房间边界夹紧（留 0.3m 边距），避免穿墙；
+  - 新增 `LineRenderer` 中心线（"路"的主脊）+ 稀疏星点 + 2 个 chevron + 终点箭头；
+  - 调试实物：青色球=老师锚点（+垂线+地面圆环），洋红色球=视野锚点；
+    `showAnchors` 默认开启，星路关闭时也显示。
+- `M3DebugDriver`：即使星路关闭也每帧 `Tick` 锚点（调试标记持续可见）；
+  `teacherValid` 传 `HasTeacherAnchor`（丢失期间用最后已知位置）。
+- `IPWorldView` 1Hz 日志新增锚点调试字段：
+  `老师锚 / target / distH / ray / chosen / focal`，
+  用于核对“身高估距 vs 环境射线”到底选了哪个距离。
+- `StardustPreview` 适配新锚点；预览图显示一条从画面底边外弯到老师头部的星路。
+
+新增/更新测试：`StarPathAnchorLogicTests`（5 项）、
+`AnchoredPath_EndpointsAndDetour`（端点 + 绕开孩子 + 抬升）。
+
+### T0 修复（2026-10-25 深夜）：老师锚点一直移动
+
+根因：
+- 星路关闭时 `StardustPath.Tick` 每帧 `_anchors.Reset()`，老师锚点被反复重建；
+- `SetOn(true)` 也 `Reset()`，每次看回老师再移开都会重新取位置；
+- `StarPath` 诊断里的 `teacher=` 用的是实时低通位置，看起来像锚点在漂。
+
+修复：
+- 老师锚点只在**第一次有效检测**时锁定，之后不因检测/路径开关更新；
+- 新增 `ResetView()`：新一轮星路只重置视野锚点，老师锚点保持；
+- 星路关闭时不再 Reset；只有新会话 `ResetAnchors()`（`M3DebugDriver.ResetSession`）才重新锁定；
+- `StarPath` 日志的 `teacher=` 改为锁定的锚点；`IPWorldView` 日志改称 `老师实时=`，
+  避免和路径锚点混淆；
+- 新增测试 `ResetView_KeepsTeacherAnchorFixed`。
