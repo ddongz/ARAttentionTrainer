@@ -53,4 +53,29 @@ public class MaskOccluderTests
         Assert.AreEqual(0.5f, m1.x, 1e-3f, "中列应保持 u=0.5（无扭转）");
         Assert.Less(m0.y, m1.y, "顶部 y 应小于底部 y（v 向下）");
     }
+
+    [Test]
+    public void TextureFocal_IsScaledToMaskPixels()
+    {
+        // 真机：PCA 纹理 960×544，focal=800（纹理像素），掩码 256×144。
+        // 直接把 800 传进 mask 像素会放大约 3.75 倍；先缩放到掩码像素再映射。
+        const float texW = 960f, texH = 544f, focal = 800f;
+        const int maskW = 256, maskH = 144;
+        float tanX = (texW * 0.5f) / focal;
+        float tanY = (texH * 0.5f) / focal;
+        float fx = focal * maskW / texW;
+        float fy = focal * maskH / texH;
+
+        var fwd = new Vector3(0, 0, 1);
+        var right = new Vector3(1, 0, 0);
+        var up = new Vector3(0, 1, 0);
+        MaskOccluder.ComputeRows(fwd, right, up, fx, fy, maskW, maskH,
+                                 fwd, right, up, tanX, tanY, Rows);
+
+        var c = Map(0f, 0f); Assert.AreEqual(0f, c.x, 1e-3f); Assert.AreEqual(0f, c.y, 1e-3f);
+        c = Map(1f, 0f);     Assert.AreEqual(1f, c.x, 1e-3f); Assert.AreEqual(0f, c.y, 1e-3f);
+        c = Map(0f, 1f);     Assert.AreEqual(0f, c.x, 1e-3f); Assert.AreEqual(1f, c.y, 1e-3f);
+        c = Map(1f, 1f);     Assert.AreEqual(1f, c.x, 1e-3f); Assert.AreEqual(1f, c.y, 1e-3f);
+        c = Map(0.5f, 0.5f); Assert.AreEqual(0.5f, c.x, 1e-3f); Assert.AreEqual(0.5f, c.y, 1e-3f);
+    }
 }

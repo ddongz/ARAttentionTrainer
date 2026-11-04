@@ -2,6 +2,7 @@
 // M3 总装胶水层：连接 帧源 → 检测 → 跟踪 → 注视 → 状态机 → IP动画/音效/日志。
 // 键盘模拟输入（本工程为新 Input System）：K=模拟注视切换  L=模拟讲话切换  R=重置会话
 using System.Collections.Generic;
+using Meta.XR;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -16,6 +17,7 @@ public class M3DebugDriver : MonoBehaviour
     public MeteorSystem meteorView;     // 流星/星环/流星雨（真机视图；可为空）
     public StardustPath stardustPath;   // 星尘路径（真机视图；可为空）
     public GuideArrow guideArrow;       // 引导箭头——已停用（方案改为流星引导），保留备用
+    SegMaskHighlight _segHighlight;     // 运行时创建的 seg 高亮调试层
     public AudioCuePlayer audioPlayer;
     public VoiceCuePlayer voiceCue;     // 语音指导（真机；片段缺失时静默跳过）
     public MicVadService vadService;
@@ -126,6 +128,9 @@ public class M3DebugDriver : MonoBehaviour
     // ── 人脸居中奖励 / 流星引导（2026-10-20 交互方案 v2）──
     float _faceDiagT;                // 人脸诊断日志节拍（2s）
     float _faceDataT = -99f;         // 上次拿到新人脸检测批次的时刻（新鲜度判定）
+    float _faceConfirmedT = -99f;    // 上次确认“属于人体的脸”的时刻（老师锚点锁定用）
+    bool _faceEverConfirmed;         // 本会话是否确认过“人体上的脸”（seg 调试期锁存，防闪烁）
+    bool _segForce;                  // 手柄 B 键：强制开启 seg（排查门控/渲染问题）
     int _faceSeenVer = -1;           // 已见过的人脸检测版本号
     float _faceCenteredDist = 99f;   // 当前主脸中心到视野中心的距离（探针/日志用）
     bool _celebrating;               // 流星雨庆典进行中（探针）
@@ -177,6 +182,23 @@ public class M3DebugDriver : MonoBehaviour
             ? new ConversationGateLogic(settings.conversationResumeSeconds, settings.selfAudioTailSeconds)
             : new ConversationGateLogic();
         _prevExternalSpeech = false;
+
+        // 2026-11-03：SelfieSeg 调试验证层——人+脸都检测到后由 Tick 开启 seg，
+        //   并把掩码高亮到真实老师身上；确认分割正确后再做精灵遮挡交互。
+        if (ipWorldView != null && ipWorldView.seg != null)
+        {
+            var hl = GetComponent<SegMaskHighlight>();
+            if (hl == null) hl = gameObject.AddComponent<SegMaskHighlight>();
+            hl.seg = ipWorldView.seg;
+            hl.frameSource = ipWorldView.frameSource;
+            hl.pca = GetComponent<PassthroughCameraAccess>();
+            // 眼相机可能在 centerEyeAnchor 的子物体上，先找子物体再回退 Camera.main
+            hl.eyeCamera = eye != null ? eye.GetComponentInChildren<Camera>() : null;
+            if (hl.eyeCamera == null) hl.eyeCamera = Camera.main;
+            _segHighlight = hl;
+            Debug.Log($"[SegHL] 创建：seg={ipWorldView.seg != null} eye={(hl.eyeCamera != null ? hl.eyeCamera.name : "null")} " +
+                      $"pca={(hl.pca != null)} frame={(hl.frameSource != null)}");
+        }
 
         CreateLogger();
         _logger.LogEvent("SessionStart");
@@ -245,6 +267,11 @@ public class M3DebugDriver : MonoBehaviour
             }
             if (!simulateGazeWithKeyboard && OVRInput.GetDown(OVRInput.Button.One))
                 SwitchLevel((CurrentLevel + 1) % 3); // 真机：手柄 A/X 键循环切档
+            if (!simulateGazeWithKeyboard && OVRInput.GetDown(OVRInput.Button.Two))
+            {
+                _segForce = !_segForce; // 真机：手柄 B/Y 键强制 seg（调试用）
+                Debug.Log($"[Seg] 强制开关 → {(_segForce ? "开" : "关")}（手柄 B/Y）");
+            }
         }
 
         bool speechEnded;     // 喂状态机的"讲话刚结束"边沿
@@ -338,7 +365,10 @@ public class M3DebugDriver : MonoBehaviour
         var detections = simMode ? (simDetections ?? EmptyDetections)
                                  : (detector != null ? detector.Latest : EmptyDetections);
         var snapshot = _tracker.Tick(detections, dt);
-        if (snapshot.valid) _everHadTarget = true;
+        // 2026-11-03 T0：首寻/引导只认“最近确认过人体脸”的老师，避免误检到椅子/海报就结束首寻。
+        bool faceConfirmedForTarget = _now - _faceConfirmedT
+            <= (settings != null ? settings.teacherFaceConfirmSeconds : 1.5f);
+        if (snapshot.valid && faceConfirmedForTarget) _everHadTarget = true;
 
         _targetLostEdge = _prevTargetValid && !snapshot.valid;
         _targetReacquiredEdge = !_prevTargetValid && snapshot.valid;
@@ -523,17 +553,36 @@ public class M3DebugDriver : MonoBehaviour
                     var b = faces[i].normalizedBox;
                     if (b.width < minW) continue;
                     var c = new Vector2(b.x + b.width * 0.5f, b.y + b.height * 0.5f);
-                    if (!FaceBelongsToAnyPerson(c, detections)) continue; // 不属于任何人体 → 非老师的脸
+                    // 2026-11-03：人体检测批次偶尔为空/滞后，只靠 detections 会漏掉真脸。
+                    //   追加两种关联：①脸落在当前跟踪的人框内；②脸靠近跟踪器的头部点。
+                    bool belongs = FaceBelongsToAnyPerson(c, detections);
+                    if (!belongs && snapshot.valid)
+                    {
+                        belongs = (snapshot.box01.width > 0f && FaceBelongsToPerson(c, snapshot.box01))
+                                  || Vector2.Distance(c, snapshot.headPoint01) < 0.12f;
+                    }
+                    if (!belongs) continue; // 不属于任何人体 → 非老师的脸
                     float d = Vector2.Distance(c, new Vector2(0.5f, 0.5f));
                     if (d < bestD) { bestD = d; hasCandidate = true; }
                 }
                 if (hasCandidate)
                 {
+                    if (!_faceEverConfirmed)
+                        Debug.Log("[Seg] 首次确认“人体上的脸” → 本会话 seg 保持可用");
+                    _faceEverConfirmed = true;
+                    _faceConfirmedT = _now;
                     _faceCenteredDist = bestD;
                     faceCenteredNow = bestD <= radius;
                 }
             }
             if (!hasCandidate) _faceCenteredDist = 99f;
+
+            // 2026-11-03：人+脸都检测到 → 开 seg 推理。
+            //   调试期用“本会话确认过一次就锁存”，避免人脸检测间歇导致高亮闪烁/整段看不见；
+            //   B/Y 键可强制开启，用于区分“门控没开”和“高亮没渲染”。
+            ipWorldView?.seg?.SetActive(_segForce || (snapshot.valid && _faceEverConfirmed));
+            // 只高亮目标老师的人框内掩码（去旁边反光/海报/其他人）
+            if (_segHighlight != null && snapshot.valid) _segHighlight.targetBox01 = snapshot.box01;
 
             // 真机诊断（2s 一条；有脸或有星星时打，避免空刷屏）
             _faceDiagT += dt;
@@ -628,7 +677,7 @@ public class M3DebugDriver : MonoBehaviour
 
         // ── 流星引导导演（三段式：疑惑→发现→带领→成功/强化/静默；2026-10-20）──
         {
-            bool everLocked = _everHadTarget || _lockStableT >= 0.35f;
+            bool everLocked = _everHadTarget || (_lockStableT >= 0.35f && faceConfirmedForTarget);
             // 触发/跟随/静默都以"孩子是否在看老师"为准（不再等老师离开相机视野）
             var gev = _guide.Tick(dt, _attending, everLocked, faceCenteredNow);
             bool hasStars = _stars.LitStars > 0;
@@ -729,10 +778,17 @@ public class M3DebugDriver : MonoBehaviour
             // 星尘路径：引导激活时显示（孩子没在看老师——即使老师仍在相机广角内）
             // 未建立老师空间锚点时不开（否则终点会退化成精灵自身位置 → 方向错误）
             bool pathOn = settings == null || settings.stardustPathEnabled;
-            bool hasAnchor = ipWorldView == null || ipWorldView.HasTeacherAnchor;
-            // 2026-10-25：孩子一看到老师（_attending）就立刻收星路——
-            // 引导导演还要 ~1s 才进 Success，不能让它一直挂在视野里。
-            stardustPath?.SetOn(ShouldShowStarPath(pathOn, _guideActive, hasAnchor, _attending));
+            // 2026-11-03 T0：老师锚点必须“最近看到过老师 + 最近确认过属于人体的脸”，
+            //   且超过 teacherAnchorTimeoutSeconds 没检测到老师 → 立即隐藏锚点/星路。
+            float timeout = settings != null ? settings.teacherAnchorTimeoutSeconds : 3f;
+            float faceWin = settings != null ? settings.teacherFaceConfirmSeconds : 1.5f;
+            bool teacherFresh = ipWorldView != null && ipWorldView.TeacherSeenWithin(timeout);
+            bool faceConfirmed = _now - _faceConfirmedT <= faceWin;
+            bool canLockAnchor = teacherFresh && faceConfirmed;
+            bool pathAnchorReady = stardustPath != null && (stardustPath.HasTeacherAnchor || canLockAnchor);
+            bool hasAnchorForPath = teacherFresh && pathAnchorReady;
+            // 孩子一看到老师（_attending）就立刻收星路。
+            stardustPath?.SetOn(ShouldShowStarPath(pathOn, _guideActive, hasAnchorForPath, _attending));
         }
         if (ipView != null)
         {
@@ -793,10 +849,15 @@ public class M3DebugDriver : MonoBehaviour
         {
             Vector3 teacherPos = ipWorldView != null ? ipWorldView.CurrentTeacherPos
                                                      : transform.position + transform.forward * 2f;
-            // teacherValid=已经建立过老师空间锚点（丢失期间 CurrentTeacherPos 保持最后已知位置）
-            bool hasTeacherAnchor = ipWorldView != null && ipWorldView.HasTeacherAnchor;
+            // 2026-11-03：锁定锚点需要“最近检测到老师 + 最近确认过人体脸”；
+            // 老师超过 timeout 未检测到 → teacherFresh=false，锚点/星路标记全部隐藏。
+            float timeout = settings != null ? settings.teacherAnchorTimeoutSeconds : 3f;
+            float faceWin = settings != null ? settings.teacherFaceConfirmSeconds : 1.5f;
+            bool teacherFresh = ipWorldView != null && ipWorldView.TeacherSeenWithin(timeout);
+            bool faceConfirmed = _now - _faceConfirmedT <= faceWin;
+            bool canLockAnchor = teacherFresh && faceConfirmed;
             // 即使星路关闭也 Tick：锚点实物标记需要持续显示/更新（调试）
-            stardustPath.Tick(_now, dt, teacherPos, hasTeacherAnchor);
+            stardustPath.Tick(_now, dt, teacherPos, canLockAnchor, teacherFresh);
             if (stardustPath.IsOn)
             {
                 _pathLogT += dt;
@@ -1261,9 +1322,17 @@ public class M3DebugDriver : MonoBehaviour
         _firstSearch?.Stop();
         _searchActive = false;
         _searchDiagT = 0f;
-        if (ipWorldView != null) ipWorldView.worldOverrideActive = false;
+        if (ipWorldView != null)
+        {
+            ipWorldView.worldOverrideActive = false;
+            ipWorldView.ResetTeacherAnchor(); // 新会话清掉上一轮老师锚点
+        }
         _faceSeenVer = -1;
         _faceDataT = -99f;
+        _faceConfirmedT = -99f;
+        _faceEverConfirmed = false;
+        _segForce = false;
+        ipWorldView?.seg?.SetActive(false);
         _simFaces = null;
         _guide?.Reset();
         _stars?.Reset();

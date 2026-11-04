@@ -29,11 +29,27 @@ public class TargetDistanceTests
     }
 
     [Test]
-    public void SeatedClosePerson_RayHitIsAccepted()
+    public void SeatedClosePerson_PlausibleRayHitIsAccepted()
     {
-        // 坐姿时人框偏矮 → 身高估计偏远（2.4m）；射线 1.1m 在合理带内
-        float d = IPWorldView.ResolveTargetDistance(2.4f, 1.1f, true, 0.35f);
+        // 坐姿近距离：身高估计 1.5m，射线 1.1m（0.73 倍）在合理带内
+        float d = IPWorldView.ResolveTargetDistance(1.5f, 1.1f, true, 0.9f);
         Assert.AreEqual(1.1f, d, 0.01f);
+    }
+
+    [Test]
+    public void DeskRayHit_AtOneMeter_IsRejected()
+    {
+        // 2026-11-03 真机：distH=2.8m、ray=1.1m（桌面），旧逻辑接受 0.35~1.8 倍 → 锚点被拉到桌面
+        float d = IPWorldView.ResolveTargetDistance(2.8f, 1.1f, true, 0.55f);
+        Assert.AreEqual(2.8f, d, 0.01f);
+    }
+
+    [Test]
+    public void HorizontalSurfaceHit_IsRejected()
+    {
+        // 射线法线朝上 = 桌面/地面，不是人
+        float d = IPWorldView.ResolveTargetDistance(2.8f, 2.6f, true, 0.55f, hitHorizontal: true);
+        Assert.AreEqual(2.8f, d, 0.01f);
     }
 
     [Test]

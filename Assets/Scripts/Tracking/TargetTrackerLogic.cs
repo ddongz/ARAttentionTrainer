@@ -16,6 +16,7 @@ public struct TargetSnapshot
     public bool frozen;           // 丢失已超 lostKeepSec，位置为冻结值
     public Vector2 headPoint01;   // 平滑后的头部点（归一化，左上原点）
     public float boxHeight01;     // 目标框的归一化高度（真机 IP 估距：距离 = 焦距×身高÷框像素高）
+    public Rect box01;            // 目标人框（归一化，左上原点）——seg 高亮只取这个框内的掩码
     public float confidence;      // 最近一次匹配的置信度
     public float lastSeenSeconds; // 距最近一次"检测到并匹配"的秒数
 }
@@ -33,6 +34,7 @@ public class TargetTrackerLogic
     bool _hasTarget;
     Vector2 _headPoint;
     float _boxHeight;
+    Rect _box01;
     float _confidence;
     float _lastSeen;
 
@@ -52,6 +54,7 @@ public class TargetTrackerLogic
         _hasTarget = false;
         _lastSeen = 0f;
         _boxHeight = 0f;
+        _box01 = default;
         _confidence = 0f;
         _fx.Reset();
         _fy.Reset();
@@ -119,6 +122,7 @@ public class TargetTrackerLogic
             if (snapped) { _hasTarget = true; _fx.Reset(); _fy.Reset(); }
             _headPoint = new Vector2(_fx.Filter(hp.x, dt), _fy.Filter(hp.y, dt));
             _boxHeight = d.normalizedBox.height;
+            _box01 = d.normalizedBox;
             _confidence = d.confidence;
             _lastSeen = 0f;
         }
@@ -133,6 +137,7 @@ public class TargetTrackerLogic
             frozen = _hasTarget && _lastSeen >= _lostKeepSec && _lastSeen < _idleDropSec,
             headPoint01 = _headPoint,
             boxHeight01 = _boxHeight,
+            box01 = _box01,
             confidence = _confidence,
             lastSeenSeconds = _lastSeen,
         };

@@ -12,7 +12,7 @@ public class StarPathAnchorLogicTests
     [Test]
     public void FirstValidFrame_EstablishesBothAnchors()
     {
-        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f);
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
         var eye = new Vector3(0f, 1.2f, 0f);
         a.Tick(0.1f, true, new Vector3(0f, 1.4f, 3f), eye, Vector3.forward, 0.55f, 0.95f);
         Assert.IsTrue(a.HasTeacherAnchor);
@@ -22,9 +22,50 @@ public class StarPathAnchorLogicTests
     }
 
     [Test]
+    public void TeacherAnchor_RequiresStableConfirmation()
+    {
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0.3f);
+        var eye = new Vector3(0f, 1.2f, 0f);
+        var t = new Vector3(0f, 1.4f, 3f);
+        a.Tick(0.1f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(a.HasTeacherAnchor, "单帧不锁定");
+        a.Tick(0.1f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(a.HasTeacherAnchor, "未满 0.3s 不锁定");
+        a.Tick(0.11f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsTrue(a.HasTeacherAnchor, "连续确认 0.3s 后锁定");
+
+        // 中途丢失 → 重新计时
+        var b = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0.3f);
+        b.Tick(0.2f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        b.Tick(0.1f, false, t, eye, Vector3.forward, 0.55f, 0.95f);
+        b.Tick(0.2f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(b.HasTeacherAnchor, "中途丢失应重新计时");
+        b.Tick(0.11f, true, t, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsTrue(b.HasTeacherAnchor);
+    }
+
+    [Test]
+    public void TeacherAnchor_MovingPositionResetsStability()
+    {
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0.5f, 0.2f);
+        var eye = new Vector3(0f, 1.2f, 0f);
+        var t0 = new Vector3(0f, 1.4f, 3f);
+        a.Tick(0.2f, true, t0, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(a.HasTeacherAnchor);
+        // 位置跳 0.5m > 稳定性半径 0.2m → 重新计时
+        var t1 = t0 + new Vector3(0.5f, 0f, 0f);
+        a.Tick(0.2f, true, t1, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(a.HasTeacherAnchor);
+        a.Tick(0.2f, true, t1, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsFalse(a.HasTeacherAnchor, "跳变后未满 0.5s 不稳定");
+        a.Tick(0.4f, true, t1, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsTrue(a.HasTeacherAnchor, "位置稳定满 0.5s 后锁定");
+    }
+
+    [Test]
     public void TeacherAnchor_IsFixedAfterFirstSighting()
     {
-        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f);
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
         var eye = new Vector3(0f, 1.2f, 0f);
         var t0 = new Vector3(0f, 1.4f, 3f);
         a.Tick(0.1f, true, t0, eye, Vector3.forward, 0.55f, 0.95f);
@@ -42,7 +83,7 @@ public class StarPathAnchorLogicTests
     [Test]
     public void ResetView_KeepsTeacherAnchorFixed()
     {
-        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f);
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
         var eye = new Vector3(0f, 1.2f, 0f);
         var t0 = new Vector3(0f, 1.4f, 3f);
         a.Tick(0.1f, true, t0, eye, Vector3.forward, 0.55f, 0.95f);
@@ -55,9 +96,23 @@ public class StarPathAnchorLogicTests
     }
 
     [Test]
+    public void ClearTeacherAnchor_AllowsRelockWhenTeacherReturns()
+    {
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
+        var eye = new Vector3(0f, 1.2f, 0f);
+        var t0 = new Vector3(0f, 1.4f, 3f);
+        a.Tick(0.1f, true, t0, eye, Vector3.forward, 0.55f, 0.95f);
+        a.ClearTeacherAnchor();
+        Assert.IsFalse(a.HasTeacherAnchor, "超时后应丢掉旧锚点");
+        var t1 = new Vector3(1f, 1.4f, 2f);
+        a.Tick(0.1f, true, t1, eye, Vector3.forward, 0.55f, 0.95f);
+        Assert.IsTrue(Near(a.TeacherAnchor, t1), "再次看到老师应重新锁定新位置");
+    }
+
+    [Test]
     public void Reset_AllowsNewTeacherAnchorForNextEpisode()
     {
-        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f);
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
         var eye = new Vector3(0f, 1.2f, 0f);
         var t0 = new Vector3(0f, 1.4f, 3f);
         a.Tick(0.1f, true, t0, eye, Vector3.forward, 0.55f, 0.95f);
@@ -70,7 +125,7 @@ public class StarPathAnchorLogicTests
     [Test]
     public void ViewAnchor_UpdatesOnlyAfterTurnIsSignificant()
     {
-        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f);
+        var a = new StarPathAnchorLogic(0.25f, 12f, 0.1f, 0f);
         var eye = new Vector3(0f, 1.2f, 0f);
         var t = new Vector3(0f, 1.4f, 3f);
         a.Tick(0.1f, true, t, eye, Vector3.forward, 0.55f, 0.95f);

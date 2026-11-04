@@ -70,7 +70,11 @@ public class MaskOccluder : MonoBehaviour
         float tanX = Vector3.Project(eR, eRv).magnitude / Mathf.Max(1e-5f, Vector3.Project(eR, eF).magnitude);
         float tanY = Vector3.Project(eT, eUv).magnitude / Mathf.Max(1e-5f, Vector3.Project(eT, eF).magnitude);
 
-        ComputeRows(pF, pR, pU, frame.focalLengthPx, seg.MaskWidth, seg.MaskHeight,
+        // 2026-11-03：frame.focalLengthPx 是**摄像头纹理像素**焦距；掩码是 256×144，
+        //   必须按掩码分辨率缩放，否则映射放大约 (纹理宽/掩码宽) 倍。
+        float fx = frame.focalLengthPx * seg.MaskWidth / Mathf.Max(1, frame.texture.width);
+        float fy = frame.focalLengthPx * seg.MaskHeight / Mathf.Max(1, frame.texture.height);
+        ComputeRows(pF, pR, pU, fx, fy, seg.MaskWidth, seg.MaskHeight,
                     eF, eRv, eUv, tanX, tanY, _rows);
 
         _mat.SetVector(Row0, _rows[0]);
@@ -97,6 +101,20 @@ public class MaskOccluder : MonoBehaviour
         Vector3 eyeFwd, Vector3 eyeRight, Vector3 eyeUp, float tanX, float tanY,
         Vector3[] rows)
     {
+        // 兼容旧调用：单一焦距按“掩码像素”解释（单测 / 纹理与掩码同分辨率时）
+        ComputeRows(pcaFwd, pcaRight, pcaUp, focalPx, focalPx,
+                    Mathf.Max(1, Mathf.RoundToInt(maskW)), Mathf.Max(1, Mathf.RoundToInt(maskH)),
+                    eyeFwd, eyeRight, eyeUp, tanX, tanY, rows);
+    }
+
+    /// <summary>2026-11-03 修正：focalMaskX/Y 必须是**掩码像素**焦距，不是摄像头纹理像素焦距。
+    /// 掩码 256×144、摄像头纹理 960×544 时，直接用纹理焦距会把映射放大约 3.75 倍。</summary>
+    public static void ComputeRows(
+        Vector3 pcaFwd, Vector3 pcaRight, Vector3 pcaUp, float focalMaskX, float focalMaskY,
+        int maskW, int maskH,
+        Vector3 eyeFwd, Vector3 eyeRight, Vector3 eyeUp, float tanX, float tanY,
+        Vector3[] rows)
+    {
         // A：[-1..1] 眼相机坐标 → PCA 相机坐标
         float r00 = Vector3.Dot(eyeRight, pcaRight) * tanX, r01 = Vector3.Dot(eyeUp, pcaRight) * tanY, r02 = Vector3.Dot(eyeFwd, pcaRight);
         float r10 = Vector3.Dot(eyeRight, pcaUp) * tanX, r11 = Vector3.Dot(eyeUp, pcaUp) * tanY, r12 = Vector3.Dot(eyeFwd, pcaUp);
@@ -108,8 +126,8 @@ public class MaskOccluder : MonoBehaviour
         float a20 = 2f * r20, a21 = -2f * r21, a22 = r22 - r20 + r21;
 
         // P：u_m = 0.5 + (x/z)·(f/W)；v_m = 0.5 − (y/z)·(f/H)（v 向下=左上原点）
-        float sx = focalPx / Mathf.Max(1f, maskW);
-        float sy = focalPx / Mathf.Max(1f, maskH);
+        float sx = focalMaskX / Mathf.Max(1f, maskW);
+        float sy = focalMaskY / Mathf.Max(1f, maskH);
         rows[0] = new Vector3(0.5f * a20 + sx * a00, 0.5f * a21 + sx * a01, 0.5f * a22 + sx * a02);
         rows[1] = new Vector3(0.5f * a20 - sy * a10, 0.5f * a21 - sy * a11, 0.5f * a22 - sy * a12);
         rows[2] = new Vector3(a20, a21, a22);

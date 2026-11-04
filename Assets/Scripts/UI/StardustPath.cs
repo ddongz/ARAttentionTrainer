@@ -107,7 +107,8 @@ public class StardustPath : MonoBehaviour
 
     public Vector3 PathStart => _path.p0;
     public Vector3 PathEnd => _path.p3;
-    public Vector3 TeacherAnchor => _anchors != null && _anchors.HasTeacherAnchor ? _anchors.TeacherAnchor : Vector3.zero;
+    public bool HasTeacherAnchor => _anchors != null && _anchors.HasTeacherAnchor;
+    public Vector3 TeacherAnchor => HasTeacherAnchor ? _anchors.TeacherAnchor : Vector3.zero;
     public Vector3 ViewAnchor => _anchors != null && _anchors.HasViewAnchor ? _anchors.ViewAnchor : Vector3.zero;
 
     // 每颗星的确定性伪随机参数（构建时生成，运行时不变）
@@ -299,7 +300,8 @@ public class StardustPath : MonoBehaviour
     /// <summary>驱动层每帧调用。teacherPos=当前/最后已知老师世界位置；
     /// teacherValid=当前是否检测到老师（首次有效时锁定老师锚点，之后固定）。
     /// 即使星路关闭也会更新锚点标记（调试用）。</summary>
-    public void Tick(float now, float dt, Vector3 teacherPos, bool teacherValid = true)
+    public void Tick(float now, float dt, Vector3 teacherPos, bool teacherValid = true,
+                     bool teacherVisible = true)
     {
         if (eye == null) return;
         EnsureBuilt();
@@ -315,19 +317,28 @@ public class StardustPath : MonoBehaviour
         if (mruk != null && mruk.TryGetRoomBounds(out var room))
             floorY = room.min.y;
 
+        // 老师超过 timeout 未检测到（driver 传 teacherVisible=false）：
+        //   丢掉旧锚点，锚点标记/星路都不再指向空位置；下次看到老师再重新锁定。
+        if (!teacherVisible) _anchors.ClearTeacherAnchor();
+
         // 星路关闭时：锚点标记仍要显示（调试）。
         // T0 修复：**不重置锚点**——老师锚点一次锁定后全程不动；
         // 只有视野锚点按显著性更新（洋红球是路径起点，可以随头动）。
+        bool hadTeacherAnchor = _anchors.HasTeacherAnchor;
         if (!IsOn)
         {
             _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
-            UpdateDebugMarkers(floorY);
+            if (!hadTeacherAnchor && _anchors.HasTeacherAnchor)
+                Debug.Log($"[Anchor] 锁定老师锚点 {_anchors.TeacherAnchor.ToString("F2")}（已确认人体脸）");
+            UpdateDebugMarkers(floorY, teacherVisible);
             return;
         }
 
         // ── 双锚点：老师锚点固定；视野锚点显著移动才更新 ──
         _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
-        UpdateDebugMarkers(floorY);
+        if (!hadTeacherAnchor && _anchors.HasTeacherAnchor)
+            Debug.Log($"[Anchor] 锁定老师锚点 {_anchors.TeacherAnchor.ToString("F2")}（已确认人体脸）");
+        UpdateDebugMarkers(floorY, teacherVisible);
 
         if (!_anchors.HasTeacherAnchor || !_anchors.HasViewAnchor) return;
 
@@ -454,6 +465,7 @@ public class StardustPath : MonoBehaviour
         {
             Vector3 tip = _path.p3;
             Vector3 back = CubicBezier(_path.p0, _path.c1, _path.c2, _path.p3, 0.90f) - tip;
+            back.y = 0f; // 路尾现在是贴地的：箭头必须平铺在地面，不能顺着下坡方向翘起来
             if (back.sqrMagnitude < 1e-6f) back = -fwd;
             back.Normalize();
             Vector3 side = Vector3.Cross(Vector3.up, back);
@@ -537,7 +549,9 @@ public class StardustPath : MonoBehaviour
                                            out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3)
     {
         p0 = start;
-        p3 = end;
+        // 2026-11-03（用户定调）：路尾落在**老师脚下**，不是脸/头高度。
+        //   end 是锁定的老师锚点（头部），这里只取它的水平位置；最后的贴地箭头也在脚下。
+        p3 = new Vector3(end.x, floorY + 0.05f, end.z);
         Vector3 fwd = new Vector3(eyeForward.x, 0f, eyeForward.z);
         if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
         fwd.Normalize();
@@ -560,8 +574,8 @@ public class StardustPath : MonoBehaviour
 
         Vector3 mid = (startFlat + endFlat) * 0.5f;
         c2 = mid + side * (sign * lateral);
-        // 中段抬到桌面以上（0.60m），避免从课桌/椅子中穿过
-        c2.y = Mathf.Lerp(floorY + 0.60f, end.y, 0.35f);
+        // 中段抬到桌面以上（0.60m），避免从课桌/椅子中穿过；路尾再落到老师脚下
+        c2.y = floorY + 0.60f;
         // 第一控制点把"画面外"的路头拉进画面
         c1 = Vector3.Lerp(p0, c2, 0.30f) + Vector3.up * 0.25f;
         c1.y = Mathf.Max(c1.y, floorY + 0.15f);
@@ -581,10 +595,10 @@ public class StardustPath : MonoBehaviour
         _centerLine.enabled = IsOn;
     }
 
-    void UpdateDebugMarkers(float floorY)
+    void UpdateDebugMarkers(float floorY, bool teacherVisible)
     {
         if (_teacherMarker == null) return;
-        bool show = showAnchors && _anchors != null;
+        bool show = showAnchors && _anchors != null && teacherVisible;
 
         bool t = show && _anchors.HasTeacherAnchor;
         _teacherMarker.gameObject.SetActive(t);

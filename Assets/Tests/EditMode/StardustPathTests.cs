@@ -134,7 +134,10 @@ public class StardustPathTests
         StardustPath.ComputeAnchoredPath(start, end, eye, Vector3.forward, 0f, 0.95f,
             out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3);
         Assert.Less(Vector3.Distance(p0, start), 1e-4f, "路径起点必须是视野锚点");
-        Assert.Less(Vector3.Distance(p3, end), 1e-4f, "路径终点必须是老师锚点");
+        Assert.AreEqual(0.05f, p3.y, 1e-4f, "路径终点应落在老师脚下（贴地）");
+        Assert.Less(Vector3.Distance(new Vector3(p3.x, 0f, p3.z),
+                                     new Vector3(end.x, 0f, end.z)), 1e-4f,
+                    "路径终点的水平位置必须是老师锚点");
 
         // 路径中段应绕过孩子（孩子站在原点）：水平距离不小于 0.45m
         float minD = float.MaxValue;

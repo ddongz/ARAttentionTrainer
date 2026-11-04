@@ -107,8 +107,8 @@ public class ExperienceSettings : ScriptableObject
     [Tooltip("人脸置信度阈值（低于此值的检测框丢弃）")]
     public float faceConfThreshold = 0.6f;
 
-    [Tooltip("人脸框最小宽度（归一化）——过滤远处的误检小框")]
-    public float faceMinBoxWidth = 0.04f;
+    [Tooltip("人脸框最小宽度（归一化）——过滤远处的误检小框；0.03 兼顾 3m 外老师")]
+    public float faceMinBoxWidth = 0.03f;
 
     [Tooltip("人脸中心距视野中心多近算'居中'（视口半径）")]
     public float faceCenterRadius = 0.22f;
@@ -165,6 +165,12 @@ public class ExperienceSettings : ScriptableObject
 
     [Tooltip("系统自己的 TTS/音效播放完后，继续忽略 VAD 的尾巴（秒），防止麦克风自听")]
     public float selfAudioTailSeconds = 0.3f;
+
+    [Tooltip("老师多久没被检测到后，隐藏老师锚点/星路（秒）")]
+    public float teacherAnchorTimeoutSeconds = 1.5f;
+
+    [Tooltip("锁定老师锚点前，必须在最近多久内检测到属于人体的脸（秒）——防误检到椅子/海报")]
+    public float teacherFaceConfirmSeconds = 1.5f;
 
     [Tooltip("星尘路径开关（未注视时地面指向老师的流光带）")]
     public bool stardustPathEnabled = true;

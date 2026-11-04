@@ -31,8 +31,19 @@ public class SelfieSegRunner : MonoBehaviour
     public Texture2D MaskTexture { get; private set; }
     /// <summary>是否已产出过至少一帧有效掩码。</summary>
     public bool HasMask { get; private set; }
+    /// <summary>是否允许推理（2026-11-03：等人+脸都检测到再由驱动开启）。</summary>
+    public bool Active { get; private set; }
     public int MaskWidth => W;
     public int MaskHeight => H;
+
+    /// <summary>驱动层控制：人体+人脸都确认后才开 seg；丢失后关掉，省 CPU。</summary>
+    public void SetActive(bool on)
+    {
+        if (Active == on) return;
+        Active = on;
+        if (!on) HasMask = false; // 隐藏高亮；保留最后一帧纹理内容不影响
+        Debug.Log(on ? "[Seg] 人+脸已确认 → 开启分割" : "[Seg] 人/脸丢失 → 暂停分割");
+    }
 
     const int W = 256, H = 144;
     Worker _worker;
@@ -67,7 +78,10 @@ public class SelfieSegRunner : MonoBehaviour
     {
         while (true)
         {
+            // 2026-11-03：人+脸都确认后驱动才 Active；未激活时不推理（模型仍已加载）
+            if (!Active) { yield return null; continue; }
             yield return new WaitForSeconds(intervalSeconds);
+            if (!Active) continue;
             if (frameSource == null || !frameSource.IsReady) continue;
             if (!frameSource.TryGetFrame(out var frame) || !frame.valid || frame.texture == null) continue;
             yield return RunOnce(frame);

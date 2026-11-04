@@ -208,15 +208,20 @@ public class IPWorldView : MonoBehaviour
     }
 
     /// <summary>锚点距离交叉校验（纯函数，供单测）：环境射线与身高估计严重矛盾时以身高为准。
-    /// 2026-10-21 真机日志：height01=0.118（远处的人）时射线打到 0.55m 的课桌 → 老师锚点被拉到 0.75m。</summary>
-    public static float ResolveTargetDistance(float distByHeight, float rayHit, bool hasRayHit, float boxHeight01)
+    /// 2026-10-21：height01=0.118（远处的人）射线打到 0.55m 课桌 → 锚点被拉近。
+    /// 2026-11-03 真机：distH=2.8m、ray=1.1m、chosen=1.1m —— 射线打到水平桌面/地面，
+    /// 不是人；因此**水平面命中一律拒绝**，且射线必须在身高估计 0.7~1.35 倍内才采用。</summary>
+    public static float ResolveTargetDistance(float distByHeight, float rayHit, bool hasRayHit,
+                                              float boxHeight01, bool hitHorizontal = false)
     {
         if (!hasRayHit || rayHit <= 0.3f || rayHit >= 8f) return distByHeight;
+        // 水平面（桌面/地面）不是人：直接以身高估计为准
+        if (hitHorizontal) return distByHeight;
         // 人框很小 = 人很远：0.3~1m 的"命中"几乎一定是课桌/椅子/墙，不可信
         if (boxHeight01 < 0.25f && rayHit < 1.0f) return distByHeight;
-        // 与身高估计严重矛盾（<0.35x 或 >1.8x）→ 以身高估计为准
+        // 与身高估计严重矛盾（<0.7x 或 >1.35x）→ 以身高估计为准
         float ratio = rayHit / Mathf.Max(0.1f, distByHeight);
-        if (ratio < 0.35f || ratio > 1.8f) return distByHeight;
+        if (ratio < 0.7f || ratio > 1.35f) return distByHeight;
         return rayHit;
     }
 
@@ -225,10 +230,26 @@ public class IPWorldView : MonoBehaviour
     /// <summary>是否已建立过老师空间锚点（未锁过目标时星路不应出现）。</summary>
     public bool HasTeacherAnchor => _hasTeacherPos;
 
+    /// <summary>老师最近是否被检测到（新鲜度窗口；超时后锚点/星路应隐藏）。</summary>
+    public bool TeacherSeenWithin(float seconds)
+        => _hasTeacherPos && Time.realtimeSinceStartup - _lastTeacherSeenTime <= seconds;
+
+    public float SecondsSinceTeacherSeen
+        => _hasTeacherPos ? Time.realtimeSinceStartup - _lastTeacherSeenTime : 999f;
+
+    /// <summary>新会话：清空老师锚点，避免上一轮的锚点残留。</summary>
+    public void ResetTeacherAnchor()
+    {
+        _hasTeacherPos = false;
+        _lastTeacherSeenTime = -999f;
+        _teacherPos = Vector3.zero;
+    }
+
     // 老师独立锚点：路标模式下精灵飞走了，老师的方位要单独记住
     Vector3 _teacherPos;
     bool _hasTeacherPos;
-    float _lastDistByHeight, _lastRayHit, _lastChosenDist;
+    float _lastTeacherSeenTime = -999f; // 老师最后一次被检测到的时间（新鲜度）
+    float _lastDistByHeight, _lastRayHit, _lastChosenDist, _lastHitNormalY;
     bool _lastHadRayHit;
 
     // 锚点（离散重建）与渲染位置（连续追赶）
@@ -357,7 +378,7 @@ public class IPWorldView : MonoBehaviour
 
             // 陪伴模式 + 有轮廓掩码：位置改为"贴住真实轮廓边缘"（用户定调：与人脸贴合互动）
             var target01 = new Vector2(x01, y01);
-            if (companionMode && seg != null && seg.Version > 0)
+            if (companionMode && seg != null && seg.Active && seg.Version > 0)
             {
                 bool leftSide = sideHint < 0f;
                 float xMin = leftSide ? 0.02f : Mathf.Clamp01(x01 - 0.04f);
@@ -382,12 +403,13 @@ public class IPWorldView : MonoBehaviour
                 dHit = Vector3.Distance(ray.origin, hit.point);
                 hasHit = dHit > 0.3f && dHit < 8f;
             }
-            // ★2026-10-21 修：环境射线可能打到课桌/墙（真机日志：0.55m），
-            //   把老师锚点拉到 0.75m → 星路只有 0.44m 长，视觉上"一团星星"。
-            dist = ResolveTargetDistance(distByHeight, dHit, hasHit, height01);
+            // ★2026-11-03：射线打到水平桌面/地面时一律拒绝；射线必须与身高估计接近才采用。
+            bool hitHorizontal = hasHit && hit.normal.y > 0.7f;
+            dist = ResolveTargetDistance(distByHeight, dHit, hasHit, height01, hitHorizontal);
             _lastDistByHeight = distByHeight;
             _lastRayHit = dHit;
             _lastHadRayHit = hasHit;
+            _lastHitNormalY = hasHit ? hit.normal.y : 0f;
             _lastChosenDist = dist;
 
             Vector3 right = frame.cameraPose.rotation * Vector3.right;
@@ -415,6 +437,7 @@ public class IPWorldView : MonoBehaviour
                     teacherNew = ClampToRoom(teacherNew, roomT, roomMargin, floorMinY, ceilClearance);
                 _teacherPos = _hasTeacherPos ? Vector3.Lerp(_teacherPos, teacherNew, k) : teacherNew;
                 _hasTeacherPos = true;
+                _lastTeacherSeenTime = Time.realtimeSinceStartup;
             }
 
             _hasWorldPos = true;
@@ -544,7 +567,7 @@ public class IPWorldView : MonoBehaviour
                       $"camPos={frame.cameraPose.position.ToString("F2")} height01={height01:F3} {roomInfo} | " +
                       $"老师实时={_teacherPos.ToString("F2")} target=({targetX01:F2},{targetY01:F2}) " +
                       $"distH={_lastDistByHeight:F2} ray={(_lastHadRayHit ? _lastRayHit.ToString("F2") : "miss")} " +
-                      $"chosen={_lastChosenDist:F2} focal={frame.focalLengthPx:F0}");
+                      $"nY={_lastHitNormalY:F2} chosen={_lastChosenDist:F2} focal={frame.focalLengthPx:F0}");
         }
     }
 

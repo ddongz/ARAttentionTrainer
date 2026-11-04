@@ -766,7 +766,7 @@ LATEST=$("$ADB" shell "ls -dt $SESS/* | head -1" | tr -d '\r')
   用于核对“身高估距 vs 环境射线”到底选了哪个距离。
 - `StardustPreview` 适配新锚点；预览图显示一条从画面底边外弯到老师头部的星路。
 
-新增/更新测试：`StarPathAnchorLogicTests`（5 项）、
+新增/更新测试：`StarPathAnchorLogicTests`（7 项）、
 `AnchoredPath_EndpointsAndDetour`（端点 + 绕开孩子 + 抬升）。
 
 ### T0 修复（2026-10-25 深夜）：老师锚点一直移动
@@ -783,3 +783,111 @@ LATEST=$("$ADB" shell "ls -dt $SESS/* | head -1" | tr -d '\r')
 - `StarPath` 日志的 `teacher=` 改为锁定的锚点；`IPWorldView` 日志改称 `老师实时=`，
   避免和路径锚点混淆；
 - 新增测试 `ResetView_KeepsTeacherAnchorFixed`。
+
+### 2026-11-03 真机追加：锚点被拉到桌面
+
+日志证据：`distH=2.8m, ray=1.1m, chosen=1.1m`（`ray.normal.y` 朝上，命中课桌/地面）；
+旧 `ResolveTargetDistance` 允许 0.35~1.8 倍，导致锚点锁在 1.1m 的桌面上，位置不准。
+
+修复：
+- `ResolveTargetDistance` 增加 `hitHorizontal`：**水平面命中一律拒绝**；
+- 射线只在身高估计 **0.7~1.35 倍**内才采用；
+- 锚点锁定从 0.5s 提高到 **1.2s**，并加 **0.25m 稳定性半径**：
+  候选位置在半径内连续 1.2s 才锁定；检测/换目标导致位置跳变会重新计时；
+- 新增测试：`DeskRayHit_AtOneMeter_IsRejected`、`HorizontalSurfaceHit_IsRejected`、
+  `TeacherAnchor_MovingPositionResetsStability`。
+
+### 追加（2026-11-03）：无老师时锚点/星路仍然出现
+
+真机日志（`20260809_192329`）：
+- 24.38s 检测到“人”（`targetValid=1`）→ 锚点锁定、星路出现；
+- 36.13s `TargetLost` 后星路继续存在到会话结束（41s）——没有新鲜度超时；
+- 该“人”没有可确认的脸，疑似误检（椅子/海报/旁人）。
+
+修复：
+- `ExperienceSettings.teacherAnchorTimeoutSeconds=1.5`：老师超过 1.5s 未被检测到 →
+  `teacherFresh=false`，锚点/星路/调试标记全部隐藏；
+- `ExperienceSettings.teacherFaceConfirmSeconds=1.5`：锁定锚点必须在最近 1.5s 内
+  检测到**属于人体的脸**（复用 `FaceBelongsToAnyPerson` 假脸过滤）；
+- `StarPathAnchorLogic` 锁定前需连续确认 **1.5s** 且位置稳定在 0.25m 内，单帧误检不锁定；
+- 首寻结束条件从“任意人体框”改为“最近确认过人体脸的人体框”
+  （`_everHadTarget` 只在 `faceConfirmedForTarget` 时置位）；避免误检把首寻骗停；
+- 超时后 `ClearTeacherAnchor()`：丢掉旧锚点，下次看到老师重新锁定（不再指向空位置）；
+- `IPWorldView.ResetTeacherAnchor()`：按 R 新会话清掉上一轮锚点；
+- 日志：锁定锚点时输出 `[Anchor] 锁定老师锚点 ...（已确认人体脸）`。
+
+新增测试：`TeacherAnchor_RequiresStableConfirmation`、`ClearTeacherAnchor_AllowsRelockWhenTeacherReturns`。
+
+## seg 调试验证层（2026-11-03 用户新方案）
+
+背景：用户确认 **seg 模型并没有真正放弃**（场景里 `SelfieSegRunner` 仍启用、0.5s/次）；
+最初设想是“精灵躲到老师身后/探头”，需要人体轮廓做遮挡。先不做精灵动作，
+只验证分割是否正确。
+
+实现：
+
+- `SelfieSegRunner` 增加 `Active`/`SetActive(bool)`：**YOLO 人体 + BlazeFace 人脸
+  都检测到**（`snapshot.valid && faceConfirmedRecently`）才开启推理；丢失则暂停，
+  省 CPU；`IPWorldView` 的伴随轮廓使用也加 `seg.Active` 判断。
+- 新增 `SegMaskHighlight`（运行时由 `M3DebugDriver.InitCore` 挂到 PCA 对象）：
+  在中心眼前 0.2m 建全屏四边形，用 `MaskOccluder.ComputeRows` 的同一单应矩阵
+  把眼相机屏幕 UV 映射到 256×144 掩码 UV。
+- 新增 `Assets/Shaders/SegMaskHighlight.shader` + `Assets/Resources/SegMaskHighlight.mat`：
+  青色填充 + 掩码梯度轮廓更亮；只做调试高亮，不做遮挡。
+- 验证：人+脸确认后青色高亮出现在真实老师身上；人/脸丢失后高亮消失；
+  检查分割边缘是否贴合老师（头发、肩膀、手臂）。
+
+后续（分割确认正确后）：用 `MaskErase` 做精灵被真实人体遮挡的“躲到身后/探头”交互。
+
+### 2026-11-03 二次真机反馈：高亮仍不可见 + 锚点锁太快
+
+真机现象：人+脸日志出现过 `[Seg] 人+脸已确认 → 开启分割`、`[Seg] 41ms 覆盖 7%`，
+但用户看不到青色轮廓；同时老师锚点锁定过快、位置不准。
+
+高亮不可见的排查与修复：
+
+- **四边形距离**：0.2m → **0.5m**。`OVRCameraRig` 单眼相机 `near clip = 0.3`，
+  0.2m 的全屏四边形会被近裁面整个裁掉（中心眼 near=0.1，容易误判为安全）。
+- **眼相机选择**：优先选“启用 + 无 targetTexture + stereo 相机”，
+  避免选到采集相机/非渲染相机；日志打印 `near/stereo/targetTex/culling`。
+- **门控锁存**：人脸检测会间歇性丢帧，旧逻辑 `faceConfirmedWithin(1.5s)` 会让
+  seg 反复开关；调试期改为“本会话确认过一次人体脸就保持开启（仍需 person 有效）”，
+  避免高亮闪烁/整段看不到。手柄 **B/Y** 可强制开关 seg，用于区分门控与渲染问题。
+- **人脸归属兜底**：除 `detections` 外，脸落在**当前跟踪人框**内或距**跟踪头部点**
+  <0.12 也认作老师脸，解决“人体检测批次为空/滞后时真脸全被判假脸”；
+  `faceMinBoxWidth` 0.04 → **0.03**（3m 外老师脸宽约 3%~4%，0.04 会漏检）。
+- **全画面弱高亮 + 目标框强高亮**：目标框外扩从 4% 提到 15%；
+  即使 YOLO 目标框偏了，整幅掩码仍有一层淡青色，能看出分割是否出来。
+- **右上角原始掩码小窗**：`SegMaskPreview.shader` 直接显示 256×144 掩码，
+  不经过单应映射；主高亮若仍不可见，小窗可独立证明“分割有没有跑”。
+- **阈值/亮度**：`_EdgeLow/High` 0.5/0.75 → 0.4/0.7，填充/轮廓 alpha 提高；
+  适配远处老师掩码值偏软的情况。
+- **单应焦距单位错误（根因）**：`frame.focalLengthPx` 是**摄像头纹理像素**（如 960×544），
+  掩码是 256×144；旧代码直接 `focal/maskW`，把映射放大约 **3.75 倍**，
+  画面边缘的老师掩码落到 `[0,1]` 外 → 整块高亮消失。现在先缩放
+  `fx = focal × maskW / texW`、`fy = focal × maskH / texH`，再算单应；
+  新增单测 `TextureFocal_IsScaledToMaskPixels` 锁定该换算。
+- 新增编辑器渲染探针 `SegHighlightRenderProbe`：
+  不等真机，直接用 URP `SingleCameraRequest` 渲染带顶部横带的合成掩码，
+  检查“着色器是否编译、四边形是否画出来、上下是否翻转”。
+  **结果（2026-11-03）**：`Builds/seg-highlight-probe.png` 顶部横带、外部透明，
+  说明着色器/四边形/UV 方向均正常；真机不可见只剩“近裁面”或“门控/映射”两类原因。
+
+锚点锁定修复：
+
+- 位置稳定确认从 1.2s 提高到 **1.5s**（用户反馈“锁太快”）；
+  候选位置必须在 0.25m 半径内连续 1.5s 才锁定，期间人脸/人体丢失会重新计时。
+- `ResolveTargetDistance` 已在上一节修复水平桌面射线；本节保持。
+
+星路终点修复：
+
+- `ComputeAnchoredPath` 的 `p3` 从“老师头部锚点”改为 **老师脚下**
+  （`floorY + 0.05m`，x/z 仍取锚点 + 侧偏），与用户定调的“老师脚下 + 贴地箭头”一致；
+- 终点箭头方向去掉 Y 分量，保证 V 形箭头平铺在地面，不顺着下坡翘起。
+
+验证（2026-11-03）：
+
+- EditMode **131/131** 通过（新增 `TextureFocal_IsScaledToMaskPixels`）；
+- `M3SimHarness` 20.2 分钟 × 3 种子全绿，讲话期间语音播放 = 0；
+- `SegHighlightRenderProbe` 渲染通过，`Builds/seg-highlight-probe.png`
+  为“顶部横带 + 外部透明”，证明着色器/四边形/UV 方向正常。

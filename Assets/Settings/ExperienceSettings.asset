@@ -43,7 +43,7 @@ MonoBehaviour:
   faceModelAsset: {fileID: 5022602860645237092, guid: dcee2b568a434aebbb5152ff29676040, type: 3}
   faceDetectionInterval: 0.33
   faceConfThreshold: 0.6
-  faceMinBoxWidth: 0.04
+  faceMinBoxWidth: 0.03
   faceCenterRadius: 0.22
   faceCenterHysteresis: 1.3
   faceFreshnessSeconds: 0.8
@@ -62,4 +62,6 @@ MonoBehaviour:
   guideRetriggerCooldownSeconds: 10
   conversationResumeSeconds: 0.5
   selfAudioTailSeconds: 0.3
+  teacherAnchorTimeoutSeconds: 1.5
+  teacherFaceConfirmSeconds: 1.5
   stardustPathEnabled: 1

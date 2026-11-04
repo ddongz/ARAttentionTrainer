@@ -22,14 +22,21 @@ public class StarPathAnchorLogic
     readonly float _viewUpdateDist;
     readonly float _viewUpdateAngle;
     readonly float _hold;
+    readonly float _teacherEstablishHold;
+    readonly float _teacherStabilityRadius;
     float _viewT;
+    float _teacherStableT;
+    Vector3 _teacherCand;
 
     public StarPathAnchorLogic(float viewUpdateDist = 0.25f, float viewUpdateAngleDeg = 12f,
-                               float hold = 0.15f)
+                               float hold = 0.15f, float teacherEstablishHold = 1.5f,
+                               float teacherStabilityRadius = 0.25f)
     {
         _viewUpdateDist = Mathf.Max(0.02f, viewUpdateDist);
         _viewUpdateAngle = Mathf.Max(1f, viewUpdateAngleDeg);
         _hold = Mathf.Max(0f, hold);
+        _teacherEstablishHold = Mathf.Max(0f, teacherEstablishHold);
+        _teacherStabilityRadius = Mathf.Max(0.02f, teacherStabilityRadius);
     }
 
     /// <summary>新会话：两个锚点都清空。</summary>
@@ -39,6 +46,8 @@ public class StarPathAnchorLogic
         HasViewAnchor = false;
         Dirty = false;
         _viewT = 0f;
+        _teacherStableT = 0f;
+        _teacherCand = default;
     }
 
     /// <summary>新一轮星路：只重置视野锚点，**老师锚点保持不动**（T0 修复）。</summary>
@@ -47,6 +56,15 @@ public class StarPathAnchorLogic
         HasViewAnchor = false;
         _viewT = 0f;
         // Dirty 由下一帧建立新视野锚点置位
+    }
+
+    /// <summary>老师长时间没被检测到：丢掉旧锚点，等下次看到老师再重新锁定。
+    /// 避免老师离开后星路还指向空位置。</summary>
+    public void ClearTeacherAnchor()
+    {
+        HasTeacherAnchor = false;
+        _teacherStableT = 0f;
+        _teacherCand = default;
     }
 
     /// <summary>每帧推进。
@@ -59,12 +77,29 @@ public class StarPathAnchorLogic
         Dirty = false;
         if (dt < 0f) dt = 0f;
 
-        // ── 老师锚点：只建立一次，之后固定 ──
+        // ── 老师锚点：位置稳定（半径内）连续确认 teacherEstablishHold 秒后才锁定 ──
         if (teacherValid && !HasTeacherAnchor)
         {
-            TeacherAnchor = teacherPos;
-            HasTeacherAnchor = true;
-            Dirty = true;
+            if (_teacherStableT <= 0f) _teacherCand = teacherPos;
+            if (Vector3.Distance(teacherPos, _teacherCand) > _teacherStabilityRadius)
+            {
+                // 老师位置还在跳（检测噪声/换目标）→ 换基准并重新计时
+                _teacherCand = teacherPos;
+                _teacherStableT = 0f;
+            }
+            else _teacherStableT += dt;
+
+            if (_teacherStableT >= _teacherEstablishHold)
+            {
+                TeacherAnchor = teacherPos;
+                HasTeacherAnchor = true;
+                Dirty = true;
+            }
+        }
+        else if (!teacherValid && !HasTeacherAnchor)
+        {
+            _teacherStableT = 0f; // 中途丢失：重新计时，避免单帧误检锁定
+            _teacherCand = default;
         }
 
         // ── 视野锚点：显著移动才更新 ──
