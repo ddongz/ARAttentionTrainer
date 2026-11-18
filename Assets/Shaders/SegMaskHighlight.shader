@@ -11,6 +11,7 @@ Shader "ARAttention/SegMaskHighlight"
         _EdgeLow ("Edge low", Range(0,1)) = 0.5
         _EdgeHigh ("Edge high", Range(0,1)) = 0.75
         _TargetRect ("Target rect (mask UV)", Vector) = (0,0,1,1)
+        _CropRect ("YOLO crop (full-frame UV)", Vector) = (0,0,1,1)
         _Fill ("Fill alpha scale", Range(0,1)) = 0.55
         _Rim ("Rim strength", Range(0,2)) = 1.2
     }
@@ -34,6 +35,7 @@ Shader "ARAttention/SegMaskHighlight"
             fixed4 _Color;
             float _EdgeLow, _EdgeHigh, _Fill, _Rim;
             float4 _TargetRect; // x,y,w,h in mask UV (top-left)
+            float4 _CropRect;   // x,y,w,h of YOLO crop in full-frame UV (top-left)
 
             struct v2f
             {
@@ -55,7 +57,10 @@ Shader "ARAttention/SegMaskHighlight"
                 float2 s = float2(i.uv.x, 1.0 - i.uv.y);
                 float3 sw = float3(s, 1.0);
                 float3 h = float3(dot(_Row0, sw), dot(_Row1, sw), dot(_Row2, sw));
-                float2 muv = h.xy / max(1e-5, abs(h.z));
+                float2 muvFull = h.xy / max(1e-5, abs(h.z));
+
+                // 2026-11-18：掩码只覆盖 YOLO 人框裁剪；全画面 UV → 裁剪框局部 UV
+                float2 muv = (muvFull - _CropRect.xy) / max(float2(1e-5, 1e-5), _CropRect.zw);
 
                 float inside = step(0.0, muv.x) * step(muv.x, 1.0)
                              * step(0.0, muv.y) * step(muv.y, 1.0);

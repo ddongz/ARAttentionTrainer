@@ -891,3 +891,107 @@ LATEST=$("$ADB" shell "ls -dt $SESS/* | head -1" | tr -d '\r')
 - `M3SimHarness` 20.2 分钟 × 3 种子全绿，讲话期间语音播放 = 0；
 - `SegHighlightRenderProbe` 渲染通过，`Builds/seg-highlight-probe.png`
   为“顶部横带 + 外部透明”，证明着色器/四边形/UV 方向正常。
+
+## 2026-11-18 真机反馈：seg 两团蓝雾、星路锚点/触发、房间级游戏空间
+
+### 1) seg 两团蓝色雾（先分析，不修）
+
+用户描述：人体分割完全失败，看到两团影响视线的蓝色雾。
+初步判断：**主要是分割模型误检，不是显示映射**。
+
+依据：
+
+- 2026-11-03 的 Python 测试视频已记录：SelfieSeg 对窗户反光、白板等大面积亮区有误检；
+- v9.4 为了验证映射，把高亮改成“全画面淡青 + 目标框内强青”，
+  等于把目标框外的误检也显示出来；两团蓝雾与“窗户/白板两块亮区”高度吻合；
+- 映射链路已由 `TextureFocal_IsScaledToMaskPixels` 和渲染探针验证；
+  如果是映射错误，通常看到的是一个被拉伸/偏移/双眼重影的人形，而不是两块独立的大区域。
+
+快速确认（下次测试）：看右上角原始掩码小窗——若小窗里也是两团，说明掩码本身错；
+若小窗正常，只有主画面两团，则是显示/立体问题。也可遮住窗户/白板看蓝雾是否消失。
+
+若后续继续：应对 YOLO 人框裁剪后送入 seg、提高阈值、加时序一致性；
+production 不应显示全画面淡青。当前按用户要求不继续修，可能放弃该线。
+
+### 2) 星路锚点抬高 + 触发放宽
+
+真机会话日志（20260825_011941）证据：
+
+- 老师锚点 `teacher=(1.62,-0.69,0.40)`，地板 `-1.54` → 锚点只有 **0.85m** 高，
+  落在老师腰部而不是头部；
+- 路尾 `end=(1.64,-1.49,0.30)` 贴地；起点 `start=(0.09,-0.90,0.23)` 约 0.64m 高；
+- 早期 `StarPath` 事件 `start/end` 全 0：`IsOn=true` 但锚点还在 1.5s 稳定期，
+  路径没生成——用户看到“有时不显示”。
+
+修复：
+
+- **老师锚点改用主脸中心**（`_teacherFaceCenter01`），不再用 YOLO 人框 25% 头点；
+  没人脸时回退到最后已知头点。锚点锁定本身要求人脸，所以锁定瞬间一定有脸。
+- **视野锚点抬高**：`startDrop 0.95 → 0.60`，`startForward 0.55 → 0.60`。
+- **路尾抬高**：新增 `endHeight=0.45f`，`ComputeAnchoredPath` 的 `p3.y = floorY + endHeight`
+  （旧重载仍默认 0.05，兼容旧测试/预览）。
+- **触发改为眼睛夹角**：不再要求引导导演激活，也不依赖 `_attending`；
+  `Vector3.Angle(eye.forward, teacherAnchor - eye.position)` **>8° 显示、<5° 隐藏**（滞回），
+  只要老师偏离视野中央就出现，哪怕 YOLO 仍检测到人。
+- **必须已锁定锚点才开路**：`pathAnchorReady = HasTeacherAnchor`，不再用 `canLockAnchor`
+  提前打开，消除 `IsOn=true` 但路径全 0 的窗口。
+- 新增 `[Path] 显示/隐藏 eyeAngle=...` 日志，便于现场核对触发。
+
+### 3) 房间级游戏空间
+
+`OVRCameraRig.prefab` 的 `OVRManager._trackingOriginType = 0`（EyeLevel，静止小圈）。
+`DeviceSceneCreator` 现在显式设置：
+
+```csharp
+manager.trackingOriginType = OVRManager.TrackingOrigin.Stage;
+```
+
+启动日志新增 `[XR] TrackingOrigin=...`。OpenXR 下 Stage 会使用房间级 Floor 空间。
+注意：系统 Guardian 若仍是 Stationary 小圈，应用无法扩大；需要用户在 Quest
+设置里重画房间边界。
+
+### 验证
+
+- EditMode 测试、构建和真机安装见本轮命令输出；
+- 会话日志：`Builds/session-20260825_011941/`（用户 11-18 测试）。
+
+## 2026-11-18 晚追加：YOLO 人框裁剪送 seg + Floor/边界抑制
+
+### seg 裁剪
+
+用户要求“用 YOLO 检测框内的图像送 seg 试一次”：
+
+- `SelfieSegRunner` 新增 `Crop01` / `MaskCrop01`：
+  - `ComputeCrop(box01)`：人框外扩 12%，限制在 [0,1]；**不扩成 16:9**
+    （16:9 会给远处瘦高的人框左右补进大片背景，反而保留窗户/白板误检）；
+    人框直接拉伸到 256×144 送模型；
+  - 推理前把源纹理裁剪区域 `Graphics.Blit` 到 256×144 sRGB RT，再送 seg；
+  - `MaskCrop01` 记录“产出当前掩码时实际用的裁剪框”，高亮不能用正在变化的新框；
+  - `TryGetEdge` 把全画面坐标转换到裁剪局部，再转回，陪伴模式不破。
+- `SegMaskHighlight`：
+  - 着色器新增 `_CropRect`，全画面 UV → 裁剪局部 UV；
+  - 目标框也转到裁剪局部；小窗直接显示裁剪掩码；
+  - 小窗从右上角 (0.42,0.24) 挪到 (0.26,0.18) 并放大到 0.18m（用户上次没看到）；
+  - 日志增加 `crop=...`。
+- 预期：模型输入以老师为主，窗户/白板/反光的大块误检应大幅减少；小窗可直接确认。
+
+### 游戏空间
+
+用户确认 Quest 3 房间级游戏可走动；v9.5 的 Stage 只改了世界原点（会话 floor 从 -1.54 变 0），
+但 Guardian 小圈仍在。按 Meta 官方 MR 建议改为：
+
+- `OVRManager.trackingOriginType = FloorLevel`（不是 Stage）；
+- `OVRManager.shouldBoundaryVisibilityBeSuppressed = true`（透视已开启，抑制 Guardian 边界）；
+- 启动日志增加 `[XR] TrackingOrigin=... boundarySuppressed(desired/actual)=...`；
+- 系统 Guardian 仍建议房间规模；若系统强制 Stationary，在应用内快捷设置改回房间边界。
+
+参考：
+- Meta OVRManager reference / boundaryless reference（agentic-tools）；
+- Unity OpenXR Meta Boundary visibility 文档；
+- Meta 社区 v74 Stationary 边界回归讨论。
+
+### 测试
+
+- 新增 `Crop_ContainsPersonBoxAndStaysInside`、`Crop_NearEdge_StaysInside`、
+  `Crop_InvalidBox_FallsBackToFullFrame`；
+- EditMode **135/135** 通过。

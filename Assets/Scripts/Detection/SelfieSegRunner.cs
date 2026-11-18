@@ -36,6 +36,12 @@ public class SelfieSegRunner : MonoBehaviour
     public int MaskWidth => W;
     public int MaskHeight => H;
 
+    /// <summary>2026-11-18：当前要求 seg 看的 YOLO 目标人框（归一化，左上原点）。全 0 表示全画面。</summary>
+    public Rect Crop01 { get; private set; } = new Rect(0f, 0f, 1f, 1f);
+    /// <summary>产出当前掩码时实际使用的裁剪框——高亮映射必须用它，不能用正在变化的新框。</summary>
+    public Rect MaskCrop01 { get; private set; } = new Rect(0f, 0f, 1f, 1f);
+    RenderTexture _cropRT;
+
     /// <summary>驱动层控制：人体+人脸都确认后才开 seg；丢失后关掉，省 CPU。</summary>
     public void SetActive(bool on)
     {
@@ -44,6 +50,33 @@ public class SelfieSegRunner : MonoBehaviour
         if (!on) HasMask = false; // 隐藏高亮；保留最后一帧纹理内容不影响
         Debug.Log(on ? "[Seg] 人+脸已确认 → 开启分割" : "[Seg] 人/脸丢失 → 暂停分割");
     }
+
+    /// <summary>2026-11-18 用户方案：只把 YOLO 目标人框（含少量边距）送 seg，
+    /// 避免窗户/白板/反光占满模型输入导致“两团蓝雾”。box01 无效时回退全画面。</summary>
+    public void SetTargetBox(Rect box01)
+    {
+        Crop01 = ComputeCrop(box01);
+    }
+
+    /// <summary>纯函数（可单测）：只取 YOLO 人框 + 少量边距，**不再扩成 16:9**。
+    /// 16:9 扩宽会把远处瘦高的人框左右补进大量背景，反而让模型继续误检窗户/白板；
+    /// 直接把人框拉伸到 256×144 送模型，背景最少。</summary>
+    public static Rect ComputeCrop(Rect box, float margin = 0.12f)
+    {
+        if (box.width <= 0.01f || box.height <= 0.01f || float.IsNaN(box.x) || float.IsNaN(box.y))
+            return new Rect(0f, 0f, 1f, 1f);
+
+        float x0 = Mathf.Clamp01(box.x - box.width * margin);
+        float y0 = Mathf.Clamp01(box.y - box.height * margin);
+        float x1 = Mathf.Clamp01(box.xMax + box.width * margin);
+        float y1 = Mathf.Clamp01(box.yMax + box.height * margin);
+        float w = x1 - x0, h = y1 - y0;
+        if (w <= 0.01f || h <= 0.01f) return new Rect(0f, 0f, 1f, 1f);
+        return new Rect(x0, y0, w, h);
+    }
+
+    static bool IsFullCrop(Rect r)
+        => r.x <= 0.001f && r.y <= 0.001f && r.width >= 0.999f && r.height >= 0.999f;
 
     const int W = 256, H = 144;
     Worker _worker;
@@ -69,6 +102,13 @@ public class SelfieSegRunner : MonoBehaviour
             filterMode = FilterMode.Bilinear,
             wrapMode = TextureWrapMode.Clamp,
         };
+        // sRGB：保持与源相机纹理相同的颜色编码，避免 Blit 到线性 RT 后 seg 输入偏色
+        _cropRT = new RenderTexture(W, H, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB)
+        {
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+        };
+        _cropRT.Create();
 
         Debug.Log($"[Seg] SelfieSeg 模型就绪（输入 {W}x{H}，CPU）");
         StartCoroutine(Loop());
@@ -92,8 +132,19 @@ public class SelfieSegRunner : MonoBehaviour
     {
         float t0 = Time.realtimeSinceStartup;
 
+        // 2026-11-18：只把 YOLO 人框裁剪区域送进模型；全画面时直接复用源纹理。
+        Rect crop = Crop01;
+        Texture src = frame.texture;
+        if (!IsFullCrop(crop))
+        {
+            // 检测框是左上原点；Graphics.Blit 的 offset 是左下原点，需要翻 y
+            var scale = new Vector2(crop.width, crop.height);
+            var offset = new Vector2(crop.x, 1f - crop.y - crop.height);
+            Graphics.Blit(frame.texture, _cropRT, scale, offset);
+            src = _cropRT;
+        }
         var textureTransform = new TextureTransform();
-        TextureConverter.ToTensor(frame.texture, _input, textureTransform);
+        TextureConverter.ToTensor(src, _input, textureTransform);
         _worker.Schedule(_input);
 
         var await = (_worker.PeekOutput(0) as Tensor<float>).ReadbackAndCloneAsync().GetAwaiter();
@@ -118,6 +169,7 @@ public class SelfieSegRunner : MonoBehaviour
 
         MaskTexture.SetPixelData(_maskBytes, 0);
         MaskTexture.Apply(false);
+        MaskCrop01 = crop; // 高亮用“产出这帧掩码时的裁剪框”，避免目标移动导致错位
         HasMask = true;
 
         // 每 4 帧（约 2 秒）打一条诊断
@@ -134,7 +186,27 @@ public class SelfieSegRunner : MonoBehaviour
     /// 例：找脸部高度附近人体左侧轮廓 → 精灵从真实身体左缘探出。
     /// </summary>
     public bool TryGetEdge(float y01, float xMin01, float xMax01, bool leftSide, out Vector2 edge01)
-        => TryGetEdgeStatic(_mask, W, H, y01, xMin01, xMax01, leftSide, edgeThreshold, out edge01);
+    {
+        // 2026-11-18：掩码现在是裁剪框局部坐标；调用方仍传全画面坐标，这里转换并转回。
+        Rect c = MaskCrop01;
+        float yl = (y01 - c.y) / Mathf.Max(1e-5f, c.height);
+        float x0 = (xMin01 - c.x) / Mathf.Max(1e-5f, c.width);
+        float x1 = (xMax01 - c.x) / Mathf.Max(1e-5f, c.width);
+        if (yl < -0.01f || yl > 1.01f || x1 < 0f || x0 > 1f)
+        {
+            edge01 = default;
+            return false;
+        }
+        if (!TryGetEdgeStatic(_mask, W, H, Mathf.Clamp01(yl),
+                              Mathf.Clamp01(x0), Mathf.Clamp01(x1),
+                              leftSide, edgeThreshold, out var local))
+        {
+            edge01 = default;
+            return false;
+        }
+        edge01 = new Vector2(c.x + local.x * c.width, c.y + local.y * c.height);
+        return true;
+    }
 
     /// <summary>纯函数版（单元测试覆盖）：在 宽w×高h 的掩码数组上找边缘。</summary>
     public static bool TryGetEdgeStatic(float[] mask, int w, int h,
@@ -184,6 +256,7 @@ public class SelfieSegRunner : MonoBehaviour
     void OnDestroy()
     {
         if (MaskTexture != null) Destroy(MaskTexture);
+        if (_cropRT != null) { _cropRT.Release(); Destroy(_cropRT); }
         if (_worker == null) return;
         _worker.PeekOutput(0)?.CompleteAllPendingOperations();
         _worker.Dispose();

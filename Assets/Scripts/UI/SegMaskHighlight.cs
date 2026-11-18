@@ -27,9 +27,11 @@ public class SegMaskHighlight : MonoBehaviour
 
     [Header("原始掩码小窗（右上角）")]
     public bool showMaskPreview = true;
-    public float previewOffsetX = 0.42f;
-    public float previewOffsetY = 0.24f;
-    public float previewSize = 0.16f;
+    // 2026-11-18：用户反馈右上角小窗“根本没看到”——挪到左上、往画面内侧，并放大；
+    //   右上角会和数据面板/视野边缘重叠，左上更显眼。
+    public float previewOffsetX = -0.26f;
+    public float previewOffsetY = 0.18f;
+    public float previewSize = 0.18f;
 
     Material _mat;
     MeshRenderer _rend;
@@ -91,10 +93,17 @@ public class SegMaskHighlight : MonoBehaviour
         MaskOccluder.ComputeRows(pF, pR, pU, fx, fy, seg.MaskWidth, seg.MaskHeight,
                                  eF, eRv, eUv, tanX, tanY, _rows);
 
+        // 2026-11-18：掩码是 YOLO 人框裁剪的局部坐标；目标框也转到局部坐标
+        Rect crop = seg.MaskCrop01;
+        _mat.SetVector("_CropRect", new Vector4(crop.x, crop.y, crop.width, crop.height));
         Rect r = targetBox01;
-        if (r.width > 0.01f && r.height > 0.01f)
+        if (r.width > 0.01f && r.height > 0.01f && crop.width > 0.01f && crop.height > 0.01f)
         {
-            // 2026-11-03：边距 4%→15%，目标框略偏时不要把真实人体裁掉
+            r = new Rect((r.x - crop.x) / crop.width,
+                         (r.y - crop.y) / crop.height,
+                         r.width / crop.width,
+                         r.height / crop.height);
+            // 边距 15%，目标框略偏时不要把真实人体裁掉
             float mx = r.width * 0.15f, my = r.height * 0.15f;
             _mat.SetVector("_TargetRect",
                 new Vector4(r.x - mx, r.y - my, r.width + 2f * mx, r.height + 2f * my));
@@ -123,8 +132,8 @@ public class SegMaskHighlight : MonoBehaviour
             float hy = Vector3.Dot(_rows[1], sw);
             float hz = Vector3.Dot(_rows[2], sw);
             Vector2 muv = new Vector2(hx, hy) / Mathf.Max(1e-5f, Mathf.Abs(hz));
-            int boxHits = SampleMaskBox(targetBox01, out int boxCount);
-            Debug.Log($"[SegHL] 显示中：muvCenter={muv.ToString("F2")} rect={targetBox01.ToString("F2")} " +
+            int boxHits = SampleMaskBox(new Rect(0f, 0f, 1f, 1f), out int boxCount);
+            Debug.Log($"[SegHL] 显示中：muvCenter={muv.ToString("F2")} crop={seg.MaskCrop01.ToString("F2")} " +
                       $"boxMask={boxHits}/{boxCount} coverage={seg.Coverage:P0} " +
                       $"cam={eyeCamera.name} near={eyeCamera.nearClipPlane:F2} " +
                       $"stereo={eyeCamera.stereoTargetEye} targetTex={(eyeCamera.targetTexture != null)} " +

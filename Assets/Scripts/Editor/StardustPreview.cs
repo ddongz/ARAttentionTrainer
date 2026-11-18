@@ -91,7 +91,7 @@ public static class StardustPreview
                 float minD = float.MaxValue, minT = 0f;
                 Vector3 p0 = default, c1 = default, c2 = default, p3 = default;
                 StardustPath.ComputeAnchoredPath(sd.ViewAnchor, sd.TeacherAnchor,
-                    new Vector3(0f, 1.6f, 0f), Vector3.forward, 0f, sd.detour,
+                    new Vector3(0f, 1.6f, 0f), Vector3.forward, 0f, sd.detour, sd.endHeight,
                     out p0, out c1, out c2, out p3);
                 for (int i = 0; i <= 100; i++)
                 {

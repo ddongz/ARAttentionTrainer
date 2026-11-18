@@ -1,6 +1,7 @@
 // Assets/Scripts/Core/M3DebugDriver.cs
 // M3 总装胶水层：连接 帧源 → 检测 → 跟踪 → 注视 → 状态机 → IP动画/音效/日志。
 // 键盘模拟输入（本工程为新 Input System）：K=模拟注视切换  L=模拟讲话切换  R=重置会话
+using System.Collections;
 using System.Collections.Generic;
 using Meta.XR;
 using UnityEngine;
@@ -129,6 +130,7 @@ public class M3DebugDriver : MonoBehaviour
     float _faceDiagT;                // 人脸诊断日志节拍（2s）
     float _faceDataT = -99f;         // 上次拿到新人脸检测批次的时刻（新鲜度判定）
     float _faceConfirmedT = -99f;    // 上次确认“属于人体的脸”的时刻（老师锚点锁定用）
+    Vector2 _teacherFaceCenter01;    // 老师主脸中心（归一化，左上原点）——老师锚点优先用脸，不用偏低的人框头点
     bool _faceEverConfirmed;         // 本会话是否确认过“人体上的脸”（seg 调试期锁存，防闪烁）
     bool _segForce;                  // 手柄 B 键：强制开启 seg（排查门控/渲染问题）
     int _faceSeenVer = -1;           // 已见过的人脸检测版本号
@@ -141,6 +143,8 @@ public class M3DebugDriver : MonoBehaviour
     float _pathLogT;                 // 星路诊断事件节拍（2s）
     bool _guideActive;               // 引导流程激活（Confused/Found/Leading）
     bool _attending;                 // 孩子正在看老师（targetValid && looking）——引导的触发/成功口径
+    bool _pathOffCenter;             // 老师偏离眼睛中央（带滞回）——星路显示条件
+    bool _prevPathShow;              // 上一帧星路显示状态（边沿日志）
     bool _listening;                 // 外界有人讲话且孩子在看老师（对话门控，Task 6 提供）
     bool _lookingNow;                // 本帧注视判定（探针/模拟机 SLA）
     List<DetectionResult> _simFaces; // 模拟人脸框（测试机注入）
@@ -155,7 +159,21 @@ public class M3DebugDriver : MonoBehaviour
     InteractionState _prevState = InteractionState.Idle;
     static readonly List<DetectionResult> EmptyDetections = new List<DetectionResult>();
 
-    void Start() => InitCore();
+    void Start()
+    {
+        InitCore();
+        if (Application.isPlaying) StartCoroutine(LogBoundaryState());
+    }
+
+    IEnumerator LogBoundaryState()
+    {
+        yield return new WaitForSeconds(2f);
+        var m = OVRManager.instance;
+        if (m != null)
+            Debug.Log($"[XR] boundarySuppressed(actual)={m.isBoundaryVisibilitySuppressed} " +
+                      $"desired={m.shouldBoundaryVisibilityBeSuppressed} " +
+                      $"origin={m.trackingOriginType}");
+    }
 
     /// <summary>核心初始化（2026-10-13：从 Start 拆出——编辑器测试机需显式调用，Start 在编辑器不自动跑）。</summary>
     public void InitCore()
@@ -206,6 +224,10 @@ public class M3DebugDriver : MonoBehaviour
         if (voiceCue != null) voiceCue.SetVolume(settings != null ? settings.cueVolumeScale : 0.9f);
         Debug.Log($"[M3] 会话数据目录：{_logger.SessionDir}");
         Debug.Log($"[M3] 干预档位：{LevelName}（gazeStart {settings?.gazeStartSeconds:0.0}s / 冷却 {settings?.reGuideCooldownSeconds:0.0}s / Peek {settings?.peekIntervalSeconds:0.0}s）");
+        // 2026-11-18：确认应用申请的是房间级 Floor（不是静止 EyeLevel），并请求抑制 Guardian 边界
+        if (OVRManager.instance != null)
+            Debug.Log($"[XR] TrackingOrigin={OVRManager.instance.trackingOriginType} " +
+                      $"boundarySuppressed(desired)={OVRManager.instance.shouldBoundaryVisibilityBeSuppressed}");
         string speechMode = (useMicVad && vadService != null)
             ? "麦克风VAD（若麦克风不可用→自动降级为'始终引导'）"
             : "键盘L模拟";
@@ -548,6 +570,7 @@ public class M3DebugDriver : MonoBehaviour
             {
                 float minW = settings != null ? settings.faceMinBoxWidth : 0.04f;
                 float bestD = float.MaxValue;
+                Vector2 bestC = default;
                 for (int i = 0; i < faces.Count; i++)
                 {
                     var b = faces[i].normalizedBox;
@@ -563,7 +586,7 @@ public class M3DebugDriver : MonoBehaviour
                     }
                     if (!belongs) continue; // 不属于任何人体 → 非老师的脸
                     float d = Vector2.Distance(c, new Vector2(0.5f, 0.5f));
-                    if (d < bestD) { bestD = d; hasCandidate = true; }
+                    if (d < bestD) { bestD = d; bestC = c; hasCandidate = true; }
                 }
                 if (hasCandidate)
                 {
@@ -571,6 +594,7 @@ public class M3DebugDriver : MonoBehaviour
                         Debug.Log("[Seg] 首次确认“人体上的脸” → 本会话 seg 保持可用");
                     _faceEverConfirmed = true;
                     _faceConfirmedT = _now;
+                    _teacherFaceCenter01 = bestC;
                     _faceCenteredDist = bestD;
                     faceCenteredNow = bestD <= radius;
                 }
@@ -581,6 +605,9 @@ public class M3DebugDriver : MonoBehaviour
             //   调试期用“本会话确认过一次就锁存”，避免人脸检测间歇导致高亮闪烁/整段看不见；
             //   B/Y 键可强制开启，用于区分“门控没开”和“高亮没渲染”。
             ipWorldView?.seg?.SetActive(_segForce || (snapshot.valid && _faceEverConfirmed));
+            // 2026-11-18：只把 YOLO 目标人框裁剪后送 seg，剔除窗户/白板/反光等背景。
+            if (ipWorldView?.seg != null)
+                ipWorldView.seg.SetTargetBox(snapshot.valid ? snapshot.box01 : new Rect(0f, 0f, 1f, 1f));
             // 只高亮目标老师的人框内掩码（去旁边反光/海报/其他人）
             if (_segHighlight != null && snapshot.valid) _segHighlight.targetBox01 = snapshot.box01;
 
@@ -785,10 +812,34 @@ public class M3DebugDriver : MonoBehaviour
             bool teacherFresh = ipWorldView != null && ipWorldView.TeacherSeenWithin(timeout);
             bool faceConfirmed = _now - _faceConfirmedT <= faceWin;
             bool canLockAnchor = teacherFresh && faceConfirmed;
-            bool pathAnchorReady = stardustPath != null && (stardustPath.HasTeacherAnchor || canLockAnchor);
-            bool hasAnchorForPath = teacherFresh && pathAnchorReady;
-            // 孩子一看到老师（_attending）就立刻收星路。
-            stardustPath?.SetOn(ShouldShowStarPath(pathOn, _guideActive, hasAnchorForPath, _attending));
+            // 2026-11-18：必须已经**锁定**老师锚点才开路；不再用 canLockAnchor 提前打开，
+            //   否则锚点还在 1.5s 稳定期时 IsOn=true 但路径为空（会话日志里的 start/end 全 0）。
+            bool pathAnchorReady = stardustPath != null && stardustPath.HasTeacherAnchor;
+            bool hasAnchorForPath = teacherFresh && pathAnchorReady && eye != null;
+
+            // 2026-11-18 用户实测：老师检测到了、只偏离视野一点时星路不出现。
+            //   触发改成“眼睛 forward 到老师锚点的 3D 夹角”：>8° 显示、<5° 隐藏（滞回），
+            //   不再依赖引导导演是否激活或 _attending 的宽口径注视判定。
+            float teacherAngle = 180f;
+            if (hasAnchorForPath && ipWorldView != null)
+            {
+                Vector3 toTeacher = ipWorldView.CurrentTeacherPos - eye.position;
+                if (toTeacher.sqrMagnitude > 1e-4f)
+                    teacherAngle = Vector3.Angle(eye.forward, toTeacher);
+            }
+            const float showAngle = 8f, hideAngle = 5f;
+            if (!_pathOffCenter && teacherAngle > showAngle) _pathOffCenter = true;
+            else if (_pathOffCenter && teacherAngle < hideAngle) _pathOffCenter = false;
+            if (!hasAnchorForPath) _pathOffCenter = false;
+
+            bool showPath = ShouldShowStarPath(pathOn, hasAnchorForPath, _pathOffCenter);
+            stardustPath?.SetOn(showPath);
+            if (showPath != _prevPathShow)
+            {
+                _prevPathShow = showPath;
+                string anchorStr = stardustPath != null ? stardustPath.TeacherAnchor.ToString("F2") : "null";
+                Debug.Log($"[Path] {(showPath ? "显示" : "隐藏")} eyeAngle={teacherAngle:F0}° anchor={anchorStr}");
+            }
         }
         if (ipView != null)
         {
@@ -829,8 +880,13 @@ public class M3DebugDriver : MonoBehaviour
             ipWorldView.companionMode = _ipAnim == IpAnim.Companion; // 陪伴 → 贴真实轮廓
             ipWorldView.sideHint = _companionSide;
             ipWorldView.targetValid = snapshot.valid; // 锚定规则：有效=跟随；丢失=冻结防漂移
-            ipWorldView.targetX01 = _heldTargetPos.x; // 老师独立锚点（最后已知视口坐标；路标模式精灵飞走后老师方位单独算）
-            ipWorldView.targetY01 = _heldTargetPos.y;
+            // 2026-11-18：老师锚点优先用**主脸中心**，不再用人框 25% 头点（实测会偏低到腰部）。
+            // 没人脸时回退到最后已知头点；锚点锁定本身仍要求人脸，所以锁定瞬间一定有脸。
+            float teacherFaceWin = settings != null ? settings.teacherFaceConfirmSeconds : 1.5f;
+            bool useFacePoint = _now - _faceConfirmedT <= teacherFaceWin;
+            Vector2 teacherPoint = useFacePoint ? _teacherFaceCenter01 : _heldTargetPos;
+            ipWorldView.targetX01 = teacherPoint.x; // 老师独立锚点（脸中心优先；路标模式单独用）
+            ipWorldView.targetY01 = teacherPoint.y;
             ipWorldView.signpostMode = _guideActive;   // 路标模式：老师消失 → IP 飞来当路标（目标丢失也重构锚点）
             ipWorldView.pointing = _guideActive;       // "找老师"动作：周期性指向手势 + 身体朝老师侧转
             ipWorldView.faceTeacherBlend = _guideActive ? 0.5f : 0f;
@@ -910,9 +966,11 @@ public class M3DebugDriver : MonoBehaviour
 
     Vector3 IpVoicePos() => ipWorldView != null ? ipWorldView.CurrentWorldPos : transform.position;
 
-    /// <summary>星路显示条件（纯函数）：开启 + 引导中 + 有老师锚点 + 孩子还没看到老师。</summary>
-    public static bool ShouldShowStarPath(bool enabled, bool guideActive, bool hasAnchor, bool attending)
-        => enabled && guideActive && hasAnchor && !attending;
+    /// <summary>星路显示条件（纯函数，2026-11-18）：开启 + 已锁定老师锚点 + 老师偏离眼睛中央。
+    /// 不再要求“引导导演激活”，也不再依赖宽口径的 attending——
+    /// 只要孩子视线偏离老师，哪怕 YOLO 仍检测到人，也应该出现星路。</summary>
+    public static bool ShouldShowStarPath(bool enabled, bool hasAnchor, bool offCenter)
+        => enabled && hasAnchor && offCenter;
 
     /// <summary>统一语音出口（v9 对话门控）：外界讲话时挂起 Critical/Guide 一条，Ambient 丢弃。</summary>
     void PlayVoice(VoiceCue cue, VoicePriority priority)
@@ -1330,8 +1388,11 @@ public class M3DebugDriver : MonoBehaviour
         _faceSeenVer = -1;
         _faceDataT = -99f;
         _faceConfirmedT = -99f;
+        _teacherFaceCenter01 = default;
         _faceEverConfirmed = false;
         _segForce = false;
+        _pathOffCenter = false;
+        _prevPathShow = false;
         ipWorldView?.seg?.SetActive(false);
         _simFaces = null;
         _guide?.Reset();

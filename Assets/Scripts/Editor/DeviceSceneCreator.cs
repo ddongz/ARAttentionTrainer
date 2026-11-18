@@ -57,6 +57,13 @@ public static class DeviceSceneCreator
         rigGO.name = "OVRCameraRig";
         var rig = rigGO.GetComponent<OVRCameraRig>();
         var manager = rigGO.GetComponent<OVRManager>();
+        // 2026-11-18：用户实测“走两步就出游戏空间”——prefab 里 _trackingOriginType=0(EyeLevel)。
+        //   Meta 官方对 MR 推荐 FloorLevel（不是 Stage）；再配合 Passthrough 的边界抑制，
+        //   让应用真正使用整个房间，而不是静止小圈。系统 Guardian 仍建议设为房间规模。
+        manager.trackingOriginType = OVRManager.TrackingOrigin.FloorLevel;
+        manager.shouldBoundaryVisibilityBeSuppressed = true;
+        Debug.Log($"[DeviceScene] TrackingOrigin={manager.trackingOriginType} " +
+                  $"boundarySuppressed={manager.shouldBoundaryVisibilityBeSuppressed}");
 
         // ── 4) 透视：运行时开关 + 中心相机背景透明 + 显式提交透视图层 ──
         manager.isInsightPassthroughEnabled = true;

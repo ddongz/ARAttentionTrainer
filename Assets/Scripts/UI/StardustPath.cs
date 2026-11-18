@@ -20,10 +20,10 @@ public class StardustPath : MonoBehaviour
     public MrukBootstrap mruk;        // 可选：房间地板高度（没有则用 eyeHeight 估算）
 
     [Header("双锚点（2026-10-25 重做）")]
-    [Tooltip("视野锚点：眼前下方多少米（水平）——设在画面底边之外，路从画面外铺进来")]
-    public float startForward = 0.55f;
-    [Tooltip("视野锚点：比眼睛低多少米——大于垂直半 FOV，保证起点在画面外")]
-    public float startDrop = 0.95f;
+    [Tooltip("视野锚点：眼前下方多少米（水平）——起点在画面下缘附近")]
+    public float startForward = 0.60f;
+    [Tooltip("视野锚点：比眼睛低多少米——2026-11-18 从 0.95 抬高到 0.60，更多角度可见")]
+    public float startDrop = 0.60f;
     [Tooltip("视野锚点显著移动距离（米）才重算星路")]
     public float viewAnchorUpdateDistance = 0.25f;
     [Tooltip("视野锚点显著转角（度）才重算星路")]
@@ -36,6 +36,8 @@ public class StardustPath : MonoBehaviour
     public float detour = 0.95f;
     [Tooltip("终点相对老师锚点的侧向偏移（米）")]
     public float endSideOffset = 0.10f;
+    [Tooltip("路尾离地高度（米）——2026-11-18 从贴地 0.05 抬高到 0.45，更多角度可见")]
+    public float endHeight = 0.45f;
     [Tooltip("无房间数据时用于估算地板高度的眼高（米）")]
     public float eyeHeight = 1.5f;
     [Tooltip("铺路星点数量（上限；实际按路长定间距）")]
@@ -353,7 +355,7 @@ public class StardustPath : MonoBehaviour
                 Vector3 side = Vector3.Cross(Vector3.up, dir.normalized);
                 end += side * endSideOffset;
             }
-            ComputeAnchoredPath(start, end, eyePos, fwd, floorY, detour,
+            ComputeAnchoredPath(start, end, eyePos, fwd, floorY, detour, endHeight,
                                 out _path.p0, out _path.c1, out _path.c2, out _path.p3);
             // 控制点不要穿墙：限制在 MRUK 房间内（留 0.3m 边距）
             if (mruk != null && mruk.TryGetRoomBounds(out var roomPath))
@@ -547,11 +549,17 @@ public class StardustPath : MonoBehaviour
     public static void ComputeAnchoredPath(Vector3 start, Vector3 end, Vector3 eyePos, Vector3 eyeForward,
                                            float floorY, float detour,
                                            out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3)
+        => ComputeAnchoredPath(start, end, eyePos, eyeForward, floorY, detour, 0.05f,
+                               out p0, out c1, out c2, out p3);
+
+    /// <summary>2026-11-18：路尾高度可调（用户实测贴地 0.05m 在很多角度看不见）。
+    /// endHeight 是路尾离地高度；x/z 仍取老师锚点 + 侧偏。</summary>
+    public static void ComputeAnchoredPath(Vector3 start, Vector3 end, Vector3 eyePos, Vector3 eyeForward,
+                                           float floorY, float detour, float endHeight,
+                                           out Vector3 p0, out Vector3 c1, out Vector3 c2, out Vector3 p3)
     {
         p0 = start;
-        // 2026-11-03（用户定调）：路尾落在**老师脚下**，不是脸/头高度。
-        //   end 是锁定的老师锚点（头部），这里只取它的水平位置；最后的贴地箭头也在脚下。
-        p3 = new Vector3(end.x, floorY + 0.05f, end.z);
+        p3 = new Vector3(end.x, floorY + Mathf.Max(0.05f, endHeight), end.z);
         Vector3 fwd = new Vector3(eyeForward.x, 0f, eyeForward.z);
         if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
         fwd.Normalize();

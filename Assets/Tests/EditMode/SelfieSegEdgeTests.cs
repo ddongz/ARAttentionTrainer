@@ -58,4 +58,35 @@ public class SelfieSegEdgeTests
                 mLeft[y * W + x] = 1f;
         Assert.IsFalse(SelfieSegRunner.TryGetEdgeStatic(mLeft, W, H, 0.5f, 0.5f, 1f, true, 0.5f, out _));
     }
+
+    [Test]
+    public void Crop_ContainsPersonBoxAndStaysInside()
+    {
+        var box = new Rect(0.40f, 0.30f, 0.20f, 0.40f);
+        Rect c = SelfieSegRunner.ComputeCrop(box);
+        Assert.LessOrEqual(c.xMin, box.xMin + 1e-4f);
+        Assert.GreaterOrEqual(c.xMax, box.xMax - 1e-4f);
+        Assert.LessOrEqual(c.yMin, box.yMin + 1e-4f);
+        Assert.GreaterOrEqual(c.yMax, box.yMax - 1e-4f);
+        Assert.GreaterOrEqual(c.xMin, 0f); Assert.LessOrEqual(c.xMax, 1f);
+        Assert.GreaterOrEqual(c.yMin, 0f); Assert.LessOrEqual(c.yMax, 1f);
+        // 不额外扩成 16:9：高瘦的人框左右只加 24% 边距，不补大片背景
+        Assert.Less(c.width, box.width * 1.30f);
+    }
+
+    [Test]
+    public void Crop_NearEdge_StaysInside()
+    {
+        Rect c = SelfieSegRunner.ComputeCrop(new Rect(0.90f, 0.10f, 0.08f, 0.20f));
+        Assert.GreaterOrEqual(c.xMin, 0f); Assert.LessOrEqual(c.xMax, 1f);
+        Assert.GreaterOrEqual(c.yMin, 0f); Assert.LessOrEqual(c.yMax, 1f);
+        Assert.Less(c.width, 0.08f * 1.30f);
+    }
+
+    [Test]
+    public void Crop_InvalidBox_FallsBackToFullFrame()
+    {
+        Rect c = SelfieSegRunner.ComputeCrop(new Rect(0f, 0f, 0f, 0f));
+        Assert.AreEqual(new Rect(0f, 0f, 1f, 1f), c);
+    }
 }

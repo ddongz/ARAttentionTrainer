@@ -1,3 +1,4 @@
+
 // Assets/Tests/EditMode/StardustPathTests.cs
 // 星尘路几何单测（2026-10-20 v6）：验证"起点在视野内 / 终点在老师脚下 / 绕开孩子 / 方向正确"。
 using NUnit.Framework;
@@ -151,16 +152,29 @@ public class StardustPathTests
     }
 
     [Test]
-    public void StarPath_HiddenAsSoonAsChildSeesTeacher()
+    public void StarPath_ShowsWheneverTeacherIsOffCenter()
     {
-        Assert.IsTrue(M3DebugDriver.ShouldShowStarPath(true, true, true, false),
-            "引导中、没看到老师 → 星路显示");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, true, true, true),
-            "孩子看到老师（attending）当帧 → 星路必须立刻消失，不等 Guide Success");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, false, true, false),
-            "没有引导 → 不显示星路");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(false, true, true, false),
+        Assert.IsTrue(M3DebugDriver.ShouldShowStarPath(true, true, true),
+            "老师偏离视野中央 + 锚点就绪 → 星路显示（不再要求引导激活）");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, true, false),
+            "老师回到视野中央 → 星路隐藏");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, false, true),
+            "没有老师锚点 → 不显示星路");
+        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(false, true, true),
             "设置里关掉星路 → 不显示");
+    }
+
+    [Test]
+    public void AnchoredPath_EndHeightIsRaised()
+    {
+        Vector3 eye = new Vector3(0f, 1.2f, 0f);
+        Vector3 start = new Vector3(0f, 0.6f, 0.6f);
+        Vector3 end = new Vector3(0.4f, 1.35f, 3f);
+        StardustPath.ComputeAnchoredPath(start, end, eye, Vector3.forward, 0f, 0.95f, 0.45f,
+            out _, out _, out _, out Vector3 p3);
+        Assert.AreEqual(0.45f, p3.y, 1e-4f, "路尾应抬到离地 0.45m");
+        Assert.Less(Vector3.Distance(new Vector3(p3.x, 0f, p3.z),
+                                     new Vector3(end.x, 0f, end.z)), 1e-4f);
     }
 
     [Test]
