@@ -27,10 +27,10 @@
               ┌──────────────── 眼镜前置摄像头 ────────────────┐
               │                                               │
         ┌─────▼─────┐   ┌──────────┐   ┌──────────────┐
-        │ YOLOv9    │   │ BlazeFace│   │ SelfieSeg    │   三个 AI 模型
-        │ 检测"人"  │   │ 检测"脸" │   │ 分割人体轮廓 │   （各自独立节奏运行，
-        └─────┬─────┘   └────┬─────┘   └──────┬───────┘    人脸约 3 次/秒）
-              └──────┬───────┴────────────────┘
+        │ YOLOv9    │   │ BlazeFace│   │ SelfieSeg    │   两个在用；分割模型
+        │ 检测"人"  │   │ 检测"脸" │   │ 已停用       │   2026-11-18 删除
+        └─────┬─────┘   └────┬─────┘   └──────────────┘   （不再挂载）
+              └──────┬───────┴
                      ▼
         ┌────────────────────────┐   ┌──────────────────┐
         │ 逻辑大脑（纯代码）      │   │ 麦克风语音检测   │
@@ -156,46 +156,38 @@
   - **锚点实物调试**：青色球=老师锚点（带垂线+地面圆环），洋红色球=视野锚点；
     星路关闭时也显示，用于核对"检测到的老师锚点到底准不准"；
   - `IPWorldView` 1Hz 日志增加 `distH / ray / chosen / focal`，可判断锚点距离用的是身高估计还是环境射线。
-- **2026-11-18 房间级游戏空间**：OVRManager 的 `trackingOriginType` 从 prefab 默认
-  **EyeLevel（静止小圈）** 改为 **FloorLevel**（Meta 官方对 MR 推荐），并开启
-  `shouldBoundaryVisibilityBeSuppressed=true`（透视已开启，可抑制 Guardian 边界）；
-  启动日志 `[XR] TrackingOrigin=... boundarySuppressed(desired/actual)=...` 可确认。
-  系统 Guardian 仍建议设为房间规模；若系统强制 Stationary，可在应用内快捷设置里改回房间边界。
-- **seg 调试验证层（2026-11-03）**：YOLO 人体 + BlazeFace 人脸**都确认后**才开启
-  SelfieSeg（0.5s/次）；新增青色掩码高亮层，按摄像头视角对齐到真实老师身上；
-  2026-11-03 二次修复：**关键根因**是单应焦距单位错误——摄像头纹理焦距（约 960×544）
-  被当成掩码像素焦距（256×144），映射放大约 3.75 倍，老师偏离画面中心时掩码 UV
-  落到 [0,1] 外，整块高亮消失；已按 mask/tex 比例缩放并加单测。
-  另外四边形从眼前 0.2m 移到 **0.5m**（单眼相机 near=0.3，0.2m 会被裁掉）；
-  人脸确认后**锁存 seg**（防人脸间歇导致高亮闪烁），手柄 **B/Y** 可强制开关；
-  全画面淡青 + 目标框内强青（框外扩 15%）；右上角新增**原始掩码小窗**，
-  不经过单应映射，可独立确认“分割有没有跑”；
-  测试视频结果见 `docs/measurements/2026-11-03-seg-video-test.md`；
-  编辑器渲染探针 `Builds/seg-highlight-probe.png` 已验证着色器/四边形正常（横带在顶部、无翻转）；
-  确认分割后再做“精灵躲到老师身后/探头”的遮挡交互。
-  **2026-11-18 真机**：看到两团蓝色雾，初步判断是 seg 模型对窗户/白板/反光的误检，
-  被“全画面淡青”调试层暴露（Python 视频测试也记录过同类误检）；
-  映射已由单测/探针验证。
-  **2026-11-18 再试**：按用户要求只把 **YOLO 目标人框裁剪区域**（外扩 12%，直接拉伸到
-  256×144，不额外扩背景）送 seg，掩码只覆盖该裁剪框；高亮/小窗都用 `MaskCrop01` 映射，
-  背景蓝雾应大幅减少。
+- **2026-11-18 游戏空间：无边界 MR**：真机日志出现
+  `AutoStationaryHelper ... 0 existing guardian data`、`numGuardians: 0`
+  → 头显当前**没有房间级 Guardian**，系统自动生成 Stationary 小圈，走两步就弹“建立游戏边界”。
+  应用侧已做：FloorLevel + **`com.oculus.feature.BOUNDARYLESS_APP`**（全无边界模式），
+  并启用 **Use Custom Main Manifest**（`useCustomMainManifest=1`），`AndroidManifestPatcher` 兜底。
+  **注意：BOUNDARYLESS_APP 与 `shouldBoundaryVisibilityBeSuppressed`（contextual）互斥**，
+  同时开会打架；现在关闭 contextual，只走 manifest 全无边界。
+  启动日志 `[XR] TrackingOrigin=... boundarySuppressed(desired/actual)=...`（desired 应为 False）。
+  若系统仍弹边界，是 OS 没接受 BOUNDARYLESS_APP：可在头显开 Travel Mode / 关闭
+  “Physical space features” / 手动创建房间级 Guardian。无边界应用无 Guardian 保护，测试场地要安全。
+- **seg 功能已删除（2026-11-18 用户决定）**：真机小窗和主画面都是乱蓝色，
+  确认 SelfieSeg 在本场景不可用。已从 Device 场景移除 `SelfieSegRunner`，
+  删除 `SegMaskHighlight` / `SegMaskPreview` / 高亮材质 / 渲染探针；`M3DebugDriver`
+  不再开启 seg，也没有 B/Y 强制开关。模型脚本/onnx 保留但未挂载，方便以后换模型再启用。
+  历史测试见 `docs/measurements/2026-11-03-seg-video-test.md`。
 - **动效素材**：7 个 flipbook（表情/光效/celebrate/star）已接入并通过 7/7 校验。
 - **质量**：EditMode **135/135**；模拟测试机 20.2 分钟 × 3 种子全绿；
   讲话期间精灵语音播放数 = **0**。
-- **交付**：v9.6 APK 已构建并安装到 Quest 3（`Builds/ARAttention-device.apk`），
-  **待 YOLO 人框裁剪 seg、FloorLevel + Guardian 边界抑制真机复核**。
+- **交付**：v9.8 APK 已构建并安装到 Quest 3（`Builds/ARAttention-device.apk`），
+  **seg 已删除；BOUNDARYLESS_APP full + custom main manifest，待真机复核**。
 
 ### 🔜 当前工作
 
-1. **v9.5 真机复核（最优先）**：
-   - **星路触发**：老师偏离眼睛中央 **>8°** 就出现（不再等引导导演，也不再看 attending）；
-     眼睛回到老师 **<5°** 才隐藏；起点抬到画面下缘附近，路尾离地 **0.45m**；
-   - **老师锚点**：改用主脸中心，约 1.5s 稳定后锁定；出视野 1.5s 隐藏；
-   - **游戏空间**：启动日志应出现 `[XR] TrackingOrigin=FloorLevel` 和
-     `boundarySuppressed(desired/actual)=True`；走两步不应再出界。
-     若仍出界，在应用内快捷设置里把边界改回“房间规模”（系统仍可能强制 Stationary）；
-   - **seg 两团蓝雾**：已改为“YOLO 人框裁剪后送 seg”；看右上角小窗是否出现
-     （已挪到画面内侧并放大），以及主画面蓝雾是否只剩老师周围的一小块。
+1. **v9.8 真机复核（最优先）**：
+   - **seg 已删除**：场景里不再有 SelfieSegRunner/高亮/小窗，主画面不应再有蓝色污渍；
+   - **游戏空间**：BOUNDARYLESS_APP（full）+ Use Custom Main Manifest=1；contextual
+     `shouldBoundaryVisibilityBeSuppressed` 已关闭（两条路互斥，同时开会打架）。
+     启动日志 `[XR] TrackingOrigin=... boundarySuppressed(desired/actual)=...`。
+     真机系统日志之前显示 `numGuardians: 0`，系统自动 Stationary 小圈；
+     若仍弹边界，是 OS 未接受 BOUNDARYLESS_APP，改用 Travel Mode / 关闭 Physical space features /
+     手动创建房间级 Guardian；
+   - **星路/锚点**：保持上一轮已确认的 8°/5° 触发、主脸中心锚点、路尾 0.45m。
 2. **`Listen`（扶耳倾听）动作**：需求已交建模师
    （`docs/specs/2026-10-24-listen-animation-requirements.md`），
    等 FBX 到位后接 Animator；当前先用 `IdleFly + Curious` 回退。
@@ -205,9 +197,8 @@
 5. **语音清单确认**：`docs/specs/2026-10-25-voice-cue-map.md` 列出每个状态会说什么；
    待确认首寻开场句优先级、有星星时是否保留轮次强化、`Peek/Start/Hum/Celebrate` 去留、
    以及早期 4 条语音的语速统一。
-6. **seg 分割验证（进行中）**：已按用户要求改为“YOLO 目标人框裁剪后送 seg”
-   （外扩 12%，直接拉伸到 256×144，不额外扩背景），高亮和小窗用 `MaskCrop01` 映射；
-   看背景蓝雾是否消失、小窗是否能稳定看到老师轮廓。若仍失败，再考虑更高阈值/时序一致性或放弃该线。
+6. **seg 功能（已删除）**：用户确认不可用，运行时不再挂载；高亮/小窗/预览资源已删除。
+   模型脚本/onnx 保留但未启用，后续若换更好的分割模型再考虑。
 
 ### 📌 待办
 

@@ -17,6 +17,10 @@
   <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
   <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
   <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+  <!-- 2026-11-18：房间级/无边界 MR。真机日志显示系统 guardian 数据为 0，
+       Quest 自动生成 Stationary 小圈，走两步就弹“建立游戏边界”。
+       BOUNDARYLESS_APP 让应用不受 Guardian 小圈限制；透视已开启。 -->
+  <uses-feature android:name="com.oculus.feature.BOUNDARYLESS_APP" android:required="true" />
   <uses-permission android:name="com.oculus.permission.USE_SCENE" />
   <horizonos:uses-horizonos-sdk horizonos:minSdkVersion="60" horizonos:targetSdkVersion="207" />
   <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />

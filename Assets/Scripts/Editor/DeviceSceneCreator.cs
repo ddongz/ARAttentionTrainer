@@ -18,9 +18,6 @@ public static class DeviceSceneCreator
     const string RigPrefabPath = "Packages/com.meta.xr.sdk.core/Prefabs/OVRCameraRig.prefab";
     const string LineTargetMatPath = "Assets/Materials/BoxTarget.mat";
     const string LineOtherMatPath = "Assets/Materials/BoxOther.mat";
-    const string OccluderMatPath = "Assets/Materials/MaskErase.mat";
-    /// <summary>遮挡（MaskOccluder）总开关——2026-10-11 用户定调"难做就不要了"，默认关。</summary>
-    const bool EnableOcclusion = false;
 
     [MenuItem("ARAttention/Device/Create Device Scene")]
     public static void CreateDeviceScene()
@@ -58,12 +55,15 @@ public static class DeviceSceneCreator
         var rig = rigGO.GetComponent<OVRCameraRig>();
         var manager = rigGO.GetComponent<OVRManager>();
         // 2026-11-18：用户实测“走两步就出游戏空间”——prefab 里 _trackingOriginType=0(EyeLevel)。
-        //   Meta 官方对 MR 推荐 FloorLevel（不是 Stage）；再配合 Passthrough 的边界抑制，
-        //   让应用真正使用整个房间，而不是静止小圈。系统 Guardian 仍建议设为房间规模。
+        //   Meta 官方对 MR 推荐 FloorLevel（不是 Stage）。
+        //   ★BOUNDARYLESS_APP（manifest）和 shouldBoundaryVisibilityBeSuppressed（contextual）
+        //     是互斥的两条路；同时开会打架。这里只走 BOUNDARYLESS_APP 全无边界模式，
+        //     关闭 contextual suppression。
         manager.trackingOriginType = OVRManager.TrackingOrigin.FloorLevel;
-        manager.shouldBoundaryVisibilityBeSuppressed = true;
+        manager.shouldBoundaryVisibilityBeSuppressed = false;
         Debug.Log($"[DeviceScene] TrackingOrigin={manager.trackingOriginType} " +
-                  $"boundarySuppressed={manager.shouldBoundaryVisibilityBeSuppressed}");
+                  $"boundarySuppressed(contextual)={manager.shouldBoundaryVisibilityBeSuppressed} " +
+                  $"（full boundaryless 由 AndroidManifest BOUNDARYLESS_APP 提供）");
 
         // ── 4) 透视：运行时开关 + 中心相机背景透明 + 显式提交透视图层 ──
         manager.isInsightPassthroughEnabled = true;
@@ -159,13 +159,8 @@ public static class DeviceSceneCreator
         ipWorld.mruk = rigGO.GetComponent<MrukBootstrap>(); // 空间围栏：锚点不出房间
         driver.ipWorldView = ipWorld;
 
-        // ── 10.6) 人体轮廓分割（陪伴模式：精灵沿真实轮廓贴合互动）
-        var seg = camGO.AddComponent<SelfieSegRunner>();
-        seg.frameSource = source;
-        seg.modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>("Assets/Models/selfie_seg_landscape.onnx");
-        if (seg.modelAsset == null)
-            Debug.LogWarning("[DeviceScene] 未找到 selfie_seg_landscape.onnx（轮廓贴合暂不可用）");
-        ipWorld.seg = seg;
+        // 2026-11-18：用户确认 seg 分割不可用（小窗/主画面都是乱蓝色），从此不再挂载
+        //   SelfieSegRunner / 高亮层；IPWorldView.seg 保持 null，陪伴模式回退到人脸位置。
 
         // ── 10.65) 人脸检测（BlazeFace）：人脸居中保持奖励（2026-10-13 用户定调 20s→跳舞庆典）
         var face = camGO.AddComponent<FaceBoxRunner>();
@@ -192,28 +187,6 @@ public static class DeviceSceneCreator
         stardust.eye = rig.centerEyeAnchor;
         stardust.mruk = rigGO.GetComponent<MrukBootstrap>(); // 地板高度（房间数据）
         driver.stardustPath = stardust;
-
-        // ── 10.7) A：人物遮挡（屏幕空间擦除）——2026-10-11 用户定调："遮挡难做就不要了"
-        // 默认关闭：Scene 里不再生成 MaskOccluder（MaskOccluder.cs / MaskErase.shader 保留，
-        // 想再试把 EnableOcclusion 改 true 重建场景即可）。
-        if (EnableOcclusion)
-        {
-            var occGO = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            occGO.name = "MaskOccluder";
-            Object.DestroyImmediate(occGO.GetComponent<Collider>());
-            occGO.transform.SetParent(rig.centerEyeAnchor, false);
-            occGO.GetComponent<MeshRenderer>().sharedMaterial = EnsureShaderMaterial(OccluderMatPath, "ARAttention/MaskErase");
-            var occluder = occGO.AddComponent<MaskOccluder>();
-            occluder.seg = seg;
-            occluder.frameSource = source;
-            occluder.pca = pca;
-            occluder.eyeCamera = centerCam;
-            Debug.Log("[DeviceScene] 遮挡（MaskOccluder）已启用");
-        }
-        else
-        {
-            Debug.Log("[DeviceScene] 遮挡（MaskOccluder）未启用——用户定调 2026-10-11（代码保留，开关 EnableOcclusion）");
-        }
 
         // ── 10.8) B：环境射线（MRUK 深度 → 实测距离）
         var envRay = rigGO.AddComponent<EnvironmentRaycastManager>();

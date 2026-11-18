@@ -18,7 +18,6 @@ public class M3DebugDriver : MonoBehaviour
     public MeteorSystem meteorView;     // 流星/星环/流星雨（真机视图；可为空）
     public StardustPath stardustPath;   // 星尘路径（真机视图；可为空）
     public GuideArrow guideArrow;       // 引导箭头——已停用（方案改为流星引导），保留备用
-    SegMaskHighlight _segHighlight;     // 运行时创建的 seg 高亮调试层
     public AudioCuePlayer audioPlayer;
     public VoiceCuePlayer voiceCue;     // 语音指导（真机；片段缺失时静默跳过）
     public MicVadService vadService;
@@ -131,8 +130,6 @@ public class M3DebugDriver : MonoBehaviour
     float _faceDataT = -99f;         // 上次拿到新人脸检测批次的时刻（新鲜度判定）
     float _faceConfirmedT = -99f;    // 上次确认“属于人体的脸”的时刻（老师锚点锁定用）
     Vector2 _teacherFaceCenter01;    // 老师主脸中心（归一化，左上原点）——老师锚点优先用脸，不用偏低的人框头点
-    bool _faceEverConfirmed;         // 本会话是否确认过“人体上的脸”（seg 调试期锁存，防闪烁）
-    bool _segForce;                  // 手柄 B 键：强制开启 seg（排查门控/渲染问题）
     int _faceSeenVer = -1;           // 已见过的人脸检测版本号
     float _faceCenteredDist = 99f;   // 当前主脸中心到视野中心的距离（探针/日志用）
     bool _celebrating;               // 流星雨庆典进行中（探针）
@@ -200,23 +197,6 @@ public class M3DebugDriver : MonoBehaviour
             ? new ConversationGateLogic(settings.conversationResumeSeconds, settings.selfAudioTailSeconds)
             : new ConversationGateLogic();
         _prevExternalSpeech = false;
-
-        // 2026-11-03：SelfieSeg 调试验证层——人+脸都检测到后由 Tick 开启 seg，
-        //   并把掩码高亮到真实老师身上；确认分割正确后再做精灵遮挡交互。
-        if (ipWorldView != null && ipWorldView.seg != null)
-        {
-            var hl = GetComponent<SegMaskHighlight>();
-            if (hl == null) hl = gameObject.AddComponent<SegMaskHighlight>();
-            hl.seg = ipWorldView.seg;
-            hl.frameSource = ipWorldView.frameSource;
-            hl.pca = GetComponent<PassthroughCameraAccess>();
-            // 眼相机可能在 centerEyeAnchor 的子物体上，先找子物体再回退 Camera.main
-            hl.eyeCamera = eye != null ? eye.GetComponentInChildren<Camera>() : null;
-            if (hl.eyeCamera == null) hl.eyeCamera = Camera.main;
-            _segHighlight = hl;
-            Debug.Log($"[SegHL] 创建：seg={ipWorldView.seg != null} eye={(hl.eyeCamera != null ? hl.eyeCamera.name : "null")} " +
-                      $"pca={(hl.pca != null)} frame={(hl.frameSource != null)}");
-        }
 
         CreateLogger();
         _logger.LogEvent("SessionStart");
@@ -289,11 +269,6 @@ public class M3DebugDriver : MonoBehaviour
             }
             if (!simulateGazeWithKeyboard && OVRInput.GetDown(OVRInput.Button.One))
                 SwitchLevel((CurrentLevel + 1) % 3); // 真机：手柄 A/X 键循环切档
-            if (!simulateGazeWithKeyboard && OVRInput.GetDown(OVRInput.Button.Two))
-            {
-                _segForce = !_segForce; // 真机：手柄 B/Y 键强制 seg（调试用）
-                Debug.Log($"[Seg] 强制开关 → {(_segForce ? "开" : "关")}（手柄 B/Y）");
-            }
         }
 
         bool speechEnded;     // 喂状态机的"讲话刚结束"边沿
@@ -590,9 +565,6 @@ public class M3DebugDriver : MonoBehaviour
                 }
                 if (hasCandidate)
                 {
-                    if (!_faceEverConfirmed)
-                        Debug.Log("[Seg] 首次确认“人体上的脸” → 本会话 seg 保持可用");
-                    _faceEverConfirmed = true;
                     _faceConfirmedT = _now;
                     _teacherFaceCenter01 = bestC;
                     _faceCenteredDist = bestD;
@@ -600,16 +572,6 @@ public class M3DebugDriver : MonoBehaviour
                 }
             }
             if (!hasCandidate) _faceCenteredDist = 99f;
-
-            // 2026-11-03：人+脸都检测到 → 开 seg 推理。
-            //   调试期用“本会话确认过一次就锁存”，避免人脸检测间歇导致高亮闪烁/整段看不见；
-            //   B/Y 键可强制开启，用于区分“门控没开”和“高亮没渲染”。
-            ipWorldView?.seg?.SetActive(_segForce || (snapshot.valid && _faceEverConfirmed));
-            // 2026-11-18：只把 YOLO 目标人框裁剪后送 seg，剔除窗户/白板/反光等背景。
-            if (ipWorldView?.seg != null)
-                ipWorldView.seg.SetTargetBox(snapshot.valid ? snapshot.box01 : new Rect(0f, 0f, 1f, 1f));
-            // 只高亮目标老师的人框内掩码（去旁边反光/海报/其他人）
-            if (_segHighlight != null && snapshot.valid) _segHighlight.targetBox01 = snapshot.box01;
 
             // 真机诊断（2s 一条；有脸或有星星时打，避免空刷屏）
             _faceDiagT += dt;
@@ -1389,11 +1351,8 @@ public class M3DebugDriver : MonoBehaviour
         _faceDataT = -99f;
         _faceConfirmedT = -99f;
         _teacherFaceCenter01 = default;
-        _faceEverConfirmed = false;
-        _segForce = false;
         _pathOffCenter = false;
         _prevPathShow = false;
-        ipWorldView?.seg?.SetActive(false);
         _simFaces = null;
         _guide?.Reset();
         _stars?.Reset();
