@@ -52,13 +52,16 @@ public class StickFigureIp : MonoBehaviour
     IPWorldView.IPAnimState _state = IPWorldView.IPAnimState.Hidden;
     float _alpha, _alphaTarget, _alphaVel;
     Color _tint = Color.white;
+    bool _pointing;
 
-    /// <summary>IPWorldView 每帧推送：动画状态（已去抖）/透明度/色调。</summary>
-    public void SetVisuals(IPWorldView.IPAnimState state, float alpha, Color tint)
+    /// <summary>IPWorldView 每帧推送：动画状态（已去抖）/透明度/色调。
+    /// pointing=true 时右臂前伸指向老师（无 Animator 时的程序化回退）。</summary>
+    public void SetVisuals(IPWorldView.IPAnimState state, float alpha, Color tint, bool pointing = false)
     {
         _state = state;
         _alphaTarget = Mathf.Clamp01(alpha);
         _tint = tint;
+        _pointing = pointing;
     }
 
     void Awake() => Build();
@@ -69,8 +72,8 @@ public class StickFigureIp : MonoBehaviour
         if (dt <= 0f) return;
         var p = PoseFor(_state);
 
-        // ── 挥手调度（陪伴态每 4.5~8s 招一次手；离开陪伴立即取消）──
-        if (_state == IPWorldView.IPAnimState.Companion)
+        // ── 挥手调度（陪伴态每 4.5~8s 招一次手；指路/离开陪伴立即取消）──
+        if (_state == IPWorldView.IPAnimState.Companion && !_pointing)
         {
             _waveTimer -= dt;
             if (_waveTimer <= 0f && _waveT < 0f)
@@ -105,7 +108,9 @@ public class StickFigureIp : MonoBehaviour
         if (_shoulderL != null)
         {
             _shoulderL.localRotation = Quaternion.Euler(-_armFwd, 0f, -_armOutL);
-            _shoulderR.localRotation = Quaternion.Euler(-_armFwd, 0f, _armOutR);
+            // 指路：右臂前伸（身体已朝老师侧转）；与挥舞互斥
+            float pointFwd = _pointing ? 78f : 0f;
+            _shoulderR.localRotation = Quaternion.Euler(-(_armFwd + pointFwd), 0f, _armOutR);
             _hipL.localRotation = Quaternion.Euler(_legBack, 0f, -3f);
             _hipR.localRotation = Quaternion.Euler(_legBack, 0f, 3f);
         }

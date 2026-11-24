@@ -1,9 +1,14 @@
 # 精灵语音清单（按交互状态）· 2026-10-25
 
 > 用途：给产品/内容确认“每个状态下小精灵会说什么”。
-> 代码入口：`Assets/Scripts/Core/M3DebugDriver.cs`、`Assets/Scripts/Audio/VoiceCuePlayer.cs`
+> 代码入口：`Assets/Scripts/Core/M3DebugDriver.cs`、`Assets/Scripts/Core/AttentionFlowLogic.cs`、`Assets/Scripts/Audio/VoiceCuePlayer.cs`
 > 音频目录：`Assets/Resources/Voice/`
-> 当前版本：v9.1（2026-10-25）
+> 当前版本：**v10（2026-11-24 主流程重构）**
+>
+> **v10 变更**：删除了“三段式引导导演”的 Confused/Found/Lead1-3/Success/Rest
+> 自动话术；看老师时不再播 Feedback，改为安静陪伴/倾听。孩子移开视线后
+> **只播一次 `Find`**（外界讲话时延后到静默，仍没看回来才补播一次）。
+> 下方第 2-4 节保留为 v9 历史记录，以本段与第 1/5 节为准。
 
 ## 规则
 

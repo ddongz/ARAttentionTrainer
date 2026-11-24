@@ -10,14 +10,19 @@
 孩子戴上眼镜上课时，系统用眼镜前置摄像头实时看着周围的大人（老师/家长），
 并有一个**卡通小精灵**在孩子的真实视野里飞来飞去「陪着」他：
 
-- 孩子**没看老师** → 小精灵飞向老师的方向，语音从老师那边传来（「看看老师在哪儿呀」），
-  地面同时亮起一条**星尘路**（中心线 + 指路彗星，指向老师）；
-- 孩子**看向老师** → 小精灵安静下来（`IdleFly` 陪伴，**不挥手**），老师头周开始积累**进度星**；
-- 孩子**持续看着老师** → 每 2.5 秒落一颗星，集满 8 颗触发**流星雨 + 烟花庆典**；
+- **开局** → 小精灵先出现在**视野中央**，再在正前方平滑游走 + 语音吸引，
+  引导孩子抬头/转头去找老师；
+- 孩子**第一次看到老师** → 在老师位置放下**世界锚点**，进入"看老师"状态；
+  **此时不生成星路**；
+- 孩子**看着老师** → 老师头周开始积累**进度星**（每 2.5 秒一颗），
+  集满 8 颗触发**流星雨 + 庆典**，奖励结束后自动开始下一轮（星星归零继续累计）；
+- 孩子**看过老师后又移开视线** → 小精灵触发"找老师"语音、飘进孩子视野、手指老师方位，
+  同时用**老师锚点 + 当前视野锚点**铺一条指向老师的**星路**；
+  孩子的目光一回到老师身上，星路**立即关闭**，继续数星星；
 - **老师/旁边人讲话** → 小精灵进入**倾听态**（最终版为扶耳动作），**完全不插话**；
   讲话结束约 0.5 秒后才恢复语音；
-- 全程**小精灵绝不消失**——它像一个小伙伴，用"引导 → 陪伴 → 奖励"的循环，
-  帮孩子一点点养成"别人说话时看对方"的习惯。
+- 全程**小精灵绝不消失**——它像一个小伙伴，用"寻找 → 陪伴 → 指路 → 奖励"的循环，
+  帮孩子一点点养成"看对方"的注意力习惯。
 
 这套思路参考了 MIT 背景的 Empowered Brain（Face2Face）项目，并针对课堂场景做了改进。
 
@@ -64,30 +69,33 @@
 1. Quest 3 用 USB 连电脑（开启开发者模式），确认 `adb devices` 能看到设备
 2. （首次或场景缺失时）菜单栏 **ARAttention → Device → Create Device Scene** 重建真机场景
 3. 命令行打包（暂无一键菜单，在工程根目录执行，Unity 路径换成你自己的）：
-   ```
+   ```bash
+   # 调试版：带识别框/数据面板/显式锚点/AX 切档
    "<Unity安装路径>\Editor\Unity.exe" -batchmode -quit -projectPath "<本工程路径>" -executeMethod BuildScript.BuildDevice
+
+   # 上线版：无识别框/数据面板/显式锚点/AX 调试输入，非 Development 构建
+   "<Unity安装路径>\Editor\Unity.exe" -batchmode -quit -projectPath "<本工程路径>" -executeMethod BuildScript.BuildDeviceProduction
    ```
-   产物：`Builds/ARAttention-device.apk`
+   产物：调试版 `Builds/ARAttention-device.apk`；上线版 `Builds/ARAttention-release.apk`
 4. 安装到眼镜（adb 在 Unity 安装目录的 `PlaybackEngines/AndroidPlayer/SDK/platform-tools/` 下）：
+   ```bash
+   adb install -r -g Builds/ARAttention-release.apk   # 上线版
    ```
-   adb install -r -g Builds/ARAttention-device.apk
-   ```
-5. 在眼镜里**拿起手柄**启动应用（Horizon 系统要求必须拿手柄）
+5. 在眼镜里**拿起手柄**启动应用（Horizon 系统要求必须拿手柄）；上线版启动后不需要再按手柄
 
 ## 目录结构（哪里放着什么）
 
 | 路径 | 内容 |
 |------|------|
-| `Assets/Scripts/Core/` | **总装胶水层**：M3DebugDriver（所有模块的总指挥）、经验参数（ExperienceSettings） |
-| `Assets/Scripts/Detection/` | 三个 AI 模型的运行器（人体/人脸检测、人体分割）+ 解码 |
-| `Assets/Scripts/Interaction/` | 交互状态机（引导→隐藏→反馈 的规则） |
+| `Assets/Scripts/Core/` | **总装胶水层**：M3DebugDriver、**AttentionFlowLogic（唯一主流程状态机）**、经验参数（ExperienceSettings） |
+| `Assets/Scripts/Detection/` | AI 模型运行器（人体/人脸检测）+ 解码 |
 | `Assets/Scripts/Tracking/` | 目标跟踪（锁定"老师"这个人并平滑他的位置） |
 | `Assets/Scripts/Gaze/` | 注视判定（孩子在看哪个方向） |
 | `Assets/Scripts/UI/` | 小精灵的可视化（3D 模型、特效、情绪泡泡）+ 调试面板 |
 | `Assets/Scripts/FrameSource/` | 摄像头画面接入 |
 | `Assets/Scripts/Audio/`、`Vad/` | 语音提示 / 麦克风说话检测 |
 | `Assets/Scripts/Logging/` | 会话数据记录（双眼见闻都被记下来供分析） |
-| `Assets/Tests/EditMode/` | 单元测试（117 个，改代码后必须全绿） |
+| `Assets/Tests/EditMode/` | 单元测试（141 个，改代码后必须全绿） |
 | `Assets/Art/IP/` | **美术资源**：精灵模型、贴图（清单见 `docs/assets-index.md`） |
 | `Assets/Models/` | AI 模型文件（.onnx / .sentis） |
 | `Assets/Scenes/` | Device（真机）、DevEditor（电脑调试） |
@@ -110,10 +118,20 @@
 - 想看设计意图和每个参数怎么定的 → `docs/specs/2026-10-07-ar-attention-design.md`
 - 提出改进意见 → 项目群里说，或写进对应文档
 
-## 目前进度（2026-10-24）
+## 目前进度（2026-11-24）
 
 ### ✅ 已完成
 
+- **v10 注意力主流程重构（2026-11-24）**：把"星路 / 语音 / 精灵位置 / 移动"的旧逻辑
+  全部收拢到唯一的 `AttentionFlowLogic` 状态机：
+  - `FirstSearch`：精灵在视野中央出现 → 连续平滑游走（不再逐点停顿/瞬移）+ 语音吸引；
+  - `Watching`：孩子第一次真正看向老师时放锚点（**不生成星路**）；看着老师累计星；
+    集满 → 奖励 → 下一轮自动从 0 开始；星星不再因走神/老师短暂出画面而清空；
+  - `GuidingBack`：看过老师后移开视线才触发——精灵飘进视野、手指老师、语音一次，
+    星路 = 老师锚点 + 当前视野锚点；看回来 **立即收路**；
+  - 删除了旧的"讲话驱动状态机 / 三段式引导导演 / 星星清空"逻辑；
+  - 语音空间声源跟随精灵；被外界讲话挡住时，"找老师"语音会在静默后补播一次；
+  - EditMode 单测与模拟测试机已按新流程重写。
 - **真机全链路**：透视 + 人体/人脸检测 + 引导/隐藏/反馈已在 Quest 3 跑通。
 - **流星引导交互 v2**：注视累计落星 → 8 颗触发流星雨 + 庆典；
   三段式引导（疑惑 → 发现 → 带领 → 成功/静默）。
@@ -172,14 +190,17 @@
   不再开启 seg，也没有 B/Y 强制开关。模型脚本/onnx 保留但未挂载，方便以后换模型再启用。
   历史测试见 `docs/measurements/2026-11-03-seg-video-test.md`。
 - **动效素材**：7 个 flipbook（表情/光效/celebrate/star）已接入并通过 7/7 校验。
-- **质量**：EditMode **135/135**；模拟测试机 20.2 分钟 × 3 种子全绿；
+- **质量**：EditMode **141/141**；模拟测试机 20 分钟 × 3 种子全绿；
   讲话期间精灵语音播放数 = **0**。
 - **交付**：v9.8 APK 已构建并安装到 Quest 3（`Builds/ARAttention-device.apk`），
   **seg 已删除；BOUNDARYLESS_APP full + custom main manifest，待真机复核**。
 
 ### 🔜 当前工作
 
-1. **v9.8 真机复核（最优先）**：
+1. **v10 真机复核（最优先）**：
+   - **主流程**：首寻游走 → 找到老师（放锚点、不铺路）→ 看老师累计星 →
+     移开视线精灵进视野指路 + 星路 → 回看立即收路 → 集满奖励 → 下一轮；
+     重点确认“看老师时星路绝不出现、移开视线才出现、回看后 ≤0.3s 关闭”；
    - **seg 已删除**：场景里不再有 SelfieSegRunner/高亮/小窗，主画面不应再有蓝色污渍；
    - **游戏空间**：BOUNDARYLESS_APP（full）+ Use Custom Main Manifest=1；contextual
      `shouldBoundaryVisibilityBeSuppressed` 已关闭（两条路互斥，同时开会打架）。
@@ -187,23 +208,27 @@
      真机系统日志之前显示 `numGuardians: 0`，系统自动 Stationary 小圈；
      若仍弹边界，是 OS 未接受 BOUNDARYLESS_APP，改用 Travel Mode / 关闭 Physical space features /
      手动创建房间级 Guardian；
-   - **星路/锚点**：保持上一轮已确认的 8°/5° 触发、主脸中心锚点、路尾 0.45m。
+   - **星路/锚点（v10）**：只在"看过老师后移开视线"的指路状态显示；
+     老师锚点第一次真正看向老师时放下（看到时平滑跟随、丢失时冻结），不再超时清除；
+     孩子看回来立即收路；正在看老师时绝不显示星路。参数见
+     `ExperienceSettings` 的"注意力主流程"段。
 2. **`Listen`（扶耳倾听）动作**：需求已交建模师
    （`docs/specs/2026-10-24-listen-animation-requirements.md`），
    等 FBX 到位后接 Animator；当前先用 `IdleFly + Curious` 回退。
 3. **表情/动画素材升级**：后续替换更精美的表情与动作素材，程序侧只换资源、不改逻辑。
-4. **真机数据回归**：对比 17 分钟课堂日志，确认 `GuideConfused` 明显下降、
-   讲话期间无精灵语音。
-5. **语音清单确认**：`docs/specs/2026-10-25-voice-cue-map.md` 列出每个状态会说什么；
-   待确认首寻开场句优先级、有星星时是否保留轮次强化、`Peek/Start/Hum/Celebrate` 去留、
-   以及早期 4 条语音的语速统一。
+4. **真机数据回归（v10 口径）**：对比课堂日志，确认
+   ① 看老师时星路绝不出现；② 移开视线后才出现星路；③ 看回来 ≤0.3s 收路；
+   ④ 讲话期间精灵语音播放数为 0。
+5. **语音清单确认（v10）**：`docs/specs/2026-10-25-voice-cue-map.md` 已标注新口径——
+   首寻每 4s 轮播、第一次找到老师一句、移开视线只播一次「找老师」、集满一句奖励；
+   待产品确认台词/语速与首寻语音是否提高优先级。
 6. **seg 功能（已删除）**：用户确认不可用，运行时不再挂载；高亮/小窗/预览资源已删除。
    模型脚本/onnx 保留但未启用，后续若换更好的分割模型再考虑。
 
 ### 📌 待办
 
 - 庆典专属语音真人录音（放 `Assets/Resources/Voice/voice_celebrate.mp3` 即生效）。
-- 结题材料中的演示视频与截图更新为 v9 效果。
+- 结题材料中的演示视频与截图更新为 v10 效果。
 
 ---
 

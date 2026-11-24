@@ -27,6 +27,7 @@ public class ConversationGateLogic
     {
         _resumeDelay = Mathf.Max(0.05f, resumeDelay);
         _selfTail = Mathf.Max(0f, selfAudioTail);
+        _silenceT = _resumeDelay; // 开场本来就没有人讲话：语音立即放行
     }
 
     public void Reset()
@@ -35,7 +36,7 @@ public class ConversationGateLogic
         Listening = false;
         ExternalSpeech = false;
         SelfAudioSuppressing = false;
-        _silenceT = 0f;
+        _silenceT = _resumeDelay;
         _selfT = 0f;
     }
 

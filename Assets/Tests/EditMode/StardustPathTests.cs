@@ -152,19 +152,6 @@ public class StardustPathTests
     }
 
     [Test]
-    public void StarPath_ShowsWheneverTeacherIsOffCenter()
-    {
-        Assert.IsTrue(M3DebugDriver.ShouldShowStarPath(true, true, true),
-            "老师偏离视野中央 + 锚点就绪 → 星路显示（不再要求引导激活）");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, true, false),
-            "老师回到视野中央 → 星路隐藏");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(true, false, true),
-            "没有老师锚点 → 不显示星路");
-        Assert.IsFalse(M3DebugDriver.ShouldShowStarPath(false, true, true),
-            "设置里关掉星路 → 不显示");
-    }
-
-    [Test]
     public void AnchoredPath_EndHeightIsRaised()
     {
         Vector3 eye = new Vector3(0f, 1.2f, 0f);

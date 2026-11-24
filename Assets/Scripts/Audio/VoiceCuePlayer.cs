@@ -22,8 +22,12 @@ public class VoiceCuePlayer : MonoBehaviour
     [Range(0f, 1f)] public float volume = 0.9f;
     [Tooltip("0=普通播放；真机设为空间音频（声音从目标方位传来）")]
     [Range(0f, 1f)] public float spatialBlend = 0.6f;
+    [Tooltip("空间语音跟随对象（小精灵）：语音播放期间声源跟着它走，" +
+             "保证“寻找老师”的声音始终从精灵所在方位传来")]
+    public Transform followTarget;
 
     AudioSource _source;
+    Transform _sourceT;   // 独立声源节点：跟随时只移动它，不移动挂载本组件的相机/驱动节点
     readonly Dictionary<VoiceCue, AudioClip> _clips = new Dictionary<VoiceCue, AudioClip>();
     readonly VoiceArbiter _arbiter = new VoiceArbiter();
 
@@ -74,7 +78,10 @@ public class VoiceCuePlayer : MonoBehaviour
 
     void Awake()
     {
-        _source = gameObject.AddComponent<AudioSource>();
+        var sourceGO = new GameObject("VoiceSource");
+        sourceGO.transform.SetParent(transform, false);
+        _sourceT = sourceGO.transform;
+        _source = sourceGO.AddComponent<AudioSource>();
         _source.playOnAwake = false;
         _source.volume = volume;
         _source.spatialBlend = spatialBlend;
@@ -160,6 +167,10 @@ public class VoiceCuePlayer : MonoBehaviour
     void Update()
     {
         if (_source == null) return;
+        // 语音跟随精灵：播放期间声源持续贴近精灵当前位置（空间方位正确）。
+        if (_source.isPlaying && followTarget != null && _sourceT != null)
+            _sourceT.position = followTarget.position;
+
         float now = Time.realtimeSinceStartup;
         if (_hasQueuedCue && _arbiter.TryDequeue(now, out int pr))
         {
@@ -176,7 +187,8 @@ public class VoiceCuePlayer : MonoBehaviour
     void PlayNow(AudioClip clip, Vector3 worldPos, VoicePriority priority)
     {
         _source.Stop();                       // 单通道：打断当前
-        transform.position = worldPos;
+        if (_sourceT != null)
+            _sourceT.position = followTarget != null ? followTarget.position : worldPos;
         _source.clip = clip;
         _source.Play();
     }

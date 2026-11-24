@@ -72,26 +72,6 @@ public class LevelFallbackTests
         Assert.IsTrue(g.GazeStarted, "降低阈值后应立刻跨过并触发");
     }
 
-    [Test]
-    public void StateMachine_ReGuideCooldown_AdjustableAtRuntime()
-    {
-        var sm = new InteractionStateMachine(reGuideCooldownSec: 10f);
-        // Idle → Guiding（讲话+未注视；初始冷却为 0 允许首导）
-        sm.Tick(new InteractionInputs { speaking = true, looking = false, targetValid = true, dt = Dt });
-        Assert.AreEqual(InteractionState.Guiding, sm.State);
-        // 注视开始 → Hidden
-        sm.Tick(new InteractionInputs { speaking = true, looking = true, gazeStarted = true, targetValid = true, dt = Dt });
-        Assert.AreEqual(InteractionState.Hidden, sm.State);
-        // 又看别处 1.5s：冷却 10s 未过 → 应保持 Hidden（不重导）
-        for (int i = 0; i < 45; i++)
-            sm.Tick(new InteractionInputs { speaking = true, looking = false, targetValid = true, dt = Dt });
-        Assert.AreEqual(InteractionState.Hidden, sm.State, "冷却 10s 未到，不应重导");
-        // 把冷却调小 → 下一帧立刻允许重导
-        sm.ReGuideCooldownSeconds = 0f;
-        sm.Tick(new InteractionInputs { speaking = true, looking = false, targetValid = true, dt = Dt });
-        Assert.AreEqual(InteractionState.Guiding, sm.State, "冷却调零后应允许重导");
-    }
-
     // ── 跟踪器框高（真机 IP 估距输入） ──
 
     [Test]

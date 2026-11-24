@@ -1,12 +1,11 @@
 // Assets/Scripts/UI/StardustPath.cs
-// 星尘路径 v6（2026-10-20 用户实测"效果一模一样"后重做）：
-//   根因①：占位贴图 star_soft.png 的内容只在左上 128×128 象限 → 每颗星偏在面片左上角、只有 1/4 大小。
-//          现改用 star_dot.png（居中裁切）。
-//   根因②：旧路径是"空中细弧线"，没有地面透视，读不出"一条路"。
-//          现改为：视野前下方（可见）起步 → 落到地面 → 贴地绕过孩子 → 铺到老师脚下；
-//          120 颗物理尺寸一致的星点（近大远小）形成真实 3D 透视的"星路"，两端淡出。
-//   方向：终点 = 老师独立空间锚点（最后一次已知世界位置）的地面投影 + 身侧偏移；
-//         老师位于背后时，控制点绕到孩子侧方（保证不穿过身体）。
+// 星路 v7（2026-11-24 主流程重构）：
+//   只在 AttentionFlowLogic 进入 GuidingBack 时显示；路径由两个锚点生成：
+//     ① 老师锚点 = 第一次找到老师时放下、之后"看到就平滑跟随、丢失就冻结"的世界位置
+//        （由驱动层通过 SetTeacherAnchor 传入，本组件不再自己锁定/超时清除）；
+//     ② 视野锚点 = 当前视野前下方（随头动，显著移动并持续 hold 才更新）。
+//   路径从视野前下方起步 → 绕过孩子 → 指向老师身侧；孩子重新看老师时由驱动层立即 SetOn(false)。
+//   星点/中心线/沿途 chevron/终点箭头/指路彗星保留，用于把"往老师那边走"表达清楚。
 // 调试：开启时每 2s 打一条 [Stardust] 日志（起点/终点/老师锚点/方位角/星数）。
 using Meta.XR.MRUtilityKit;
 using UnityEngine;
@@ -22,8 +21,8 @@ public class StardustPath : MonoBehaviour
     [Header("双锚点（2026-10-25 重做）")]
     [Tooltip("视野锚点：眼前下方多少米（水平）——起点在画面下缘附近")]
     public float startForward = 0.60f;
-    [Tooltip("视野锚点：比眼睛低多少米——2026-11-18 从 0.95 抬高到 0.60，更多角度可见")]
-    public float startDrop = 0.60f;
+    [Tooltip("视野锚点：比眼睛低多少米——2026-11-24 从 0.60 再抬到 0.35（用户：星路在视野里仍偏低）")]
+    public float startDrop = 0.35f;
     [Tooltip("视野锚点显著移动距离（米）才重算星路")]
     public float viewAnchorUpdateDistance = 0.25f;
     [Tooltip("视野锚点显著转角（度）才重算星路")]
@@ -36,8 +35,8 @@ public class StardustPath : MonoBehaviour
     public float detour = 0.95f;
     [Tooltip("终点相对老师锚点的侧向偏移（米）")]
     public float endSideOffset = 0.10f;
-    [Tooltip("路尾离地高度（米）——2026-11-18 从贴地 0.05 抬高到 0.45，更多角度可见")]
-    public float endHeight = 0.45f;
+    [Tooltip("路尾离地高度（米）——2026-11-24 从 0.45 抬到 0.60，整条路在视野中更高")]
+    public float endHeight = 0.60f;
     [Tooltip("无房间数据时用于估算地板高度的眼高（米）")]
     public float eyeHeight = 1.5f;
     [Tooltip("铺路星点数量（上限；实际按路长定间距）")]
@@ -81,7 +80,10 @@ public class StardustPath : MonoBehaviour
 
     Path _path;
     bool _hasPath, _built;
-    StarPathAnchorLogic _anchors;
+    StarPathAnchorLogic _anchors;          // 视野锚点（当前视野前下方，带防抖）
+    Vector3 _teacherAnchor;                // 老师锚点（由 AttentionFlowLogic 提供）
+    Vector3 _pathTeacherAnchor;            // 当前路径构建时使用的老师锚点
+    bool _hasTeacherAnchor;
     float _flow, _diagT;
 
     Transform[] _dots;
@@ -98,19 +100,42 @@ public class StardustPath : MonoBehaviour
     LineRenderer _teacherStem, _teacherRing;
     Material _markerMatCyan, _markerMatMagenta;
 
-    /// <summary>新会话：清空两个锚点，重新锁定老师位置。</summary>
-    public void ResetAnchors()
+    /// <summary>新会话：清空视野锚点与老师锚点。</summary>
+    public void ResetSession()
     {
         EnsureAnchors();
         _anchors.Reset();
+        _hasTeacherAnchor = false;
+        _teacherAnchor = default;
         _hasPath = false;
         HidePathVisuals();
     }
 
+    /// <summary>把驱动层（AttentionFlowLogic）维护的老师锚点传进来。
+    /// 第一次设置即"放下锚点"；之后看到老师时平滑更新，丢失时驱动层冻结。
+    /// 锚点移动超过 2cm 时标记路径需要重算，避免每帧重建整条星路。</summary>
+    public void SetTeacherAnchor(Vector3 pos)
+    {
+        if (!_hasTeacherAnchor || Vector3.Distance(pos, _teacherAnchor) > 0.02f)
+        {
+            _teacherAnchor = pos;
+            _hasTeacherAnchor = true;
+            if (_hasPath && Vector3.Distance(pos, _pathTeacherAnchor) > 0.02f) _hasPath = false;
+        }
+    }
+
     public Vector3 PathStart => _path.p0;
     public Vector3 PathEnd => _path.p3;
-    public bool HasTeacherAnchor => _anchors != null && _anchors.HasTeacherAnchor;
-    public Vector3 TeacherAnchor => HasTeacherAnchor ? _anchors.TeacherAnchor : Vector3.zero;
+    public bool HasTeacherAnchor => _hasTeacherAnchor;
+    public Vector3 TeacherAnchor => _teacherAnchor;
+
+    /// <summary>星路当前起点（世界坐标，孩子脚前下方）。供驱动层把小精灵"钉"在路头。
+    /// 返回 false = 星路没开或本轮路径还没建立（刚打开的第一帧）。</summary>
+    public bool TryGetPathStart(out Vector3 start)
+    {
+        start = _path.p0;
+        return IsOn && _hasPath;
+    }
     public Vector3 ViewAnchor => _anchors != null && _anchors.HasViewAnchor ? _anchors.ViewAnchor : Vector3.zero;
 
     // 每颗星的确定性伪随机参数（构建时生成，运行时不变）
@@ -274,8 +299,8 @@ public class StardustPath : MonoBehaviour
         EnsureAnchors();
         if (on)
         {
-            // 新一轮星路：只换视野锚点（路径起点），**老师锚点保持上次锁定的位置不动**
-            _anchors.ResetView();
+            // 新一轮指路：视野锚点取当前视野（老师锚点由驱动层持续提供）
+            _anchors.Reset();
             _hasPath = false;
             _cometT = 0f;
             _flow = 0f;
@@ -299,11 +324,9 @@ public class StardustPath : MonoBehaviour
                                                viewAnchorUpdateAngle, anchorUpdateHold);
     }
 
-    /// <summary>驱动层每帧调用。teacherPos=当前/最后已知老师世界位置；
-    /// teacherValid=当前是否检测到老师（首次有效时锁定老师锚点，之后固定）。
-    /// 即使星路关闭也会更新锚点标记（调试用）。</summary>
-    public void Tick(float now, float dt, Vector3 teacherPos, bool teacherValid = true,
-                     bool teacherVisible = true)
+    /// <summary>驱动层每帧调用。老师锚点由外部（AttentionFlowLogic）通过 SetTeacherAnchor 提供；
+    /// 视野锚点在这里按当前头姿维护。星路关闭时只更新调试标记，不铺路。</summary>
+    public void Tick(float now, float dt)
     {
         if (eye == null) return;
         EnsureBuilt();
@@ -319,36 +342,17 @@ public class StardustPath : MonoBehaviour
         if (mruk != null && mruk.TryGetRoomBounds(out var room))
             floorY = room.min.y;
 
-        // 老师超过 timeout 未检测到（driver 传 teacherVisible=false）：
-        //   丢掉旧锚点，锚点标记/星路都不再指向空位置；下次看到老师再重新锁定。
-        if (!teacherVisible) _anchors.ClearTeacherAnchor();
+        _anchors.Tick(dt, eyePos, fwd, startForward, startDrop);
+        UpdateDebugMarkers(floorY);
 
-        // 星路关闭时：锚点标记仍要显示（调试）。
-        // T0 修复：**不重置锚点**——老师锚点一次锁定后全程不动；
-        // 只有视野锚点按显著性更新（洋红球是路径起点，可以随头动）。
-        bool hadTeacherAnchor = _anchors.HasTeacherAnchor;
-        if (!IsOn)
-        {
-            _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
-            if (!hadTeacherAnchor && _anchors.HasTeacherAnchor)
-                Debug.Log($"[Anchor] 锁定老师锚点 {_anchors.TeacherAnchor.ToString("F2")}（已确认人体脸）");
-            UpdateDebugMarkers(floorY, teacherVisible);
-            return;
-        }
+        if (!IsOn || !_hasTeacherAnchor || !_anchors.HasViewAnchor) return;
 
-        // ── 双锚点：老师锚点固定；视野锚点显著移动才更新 ──
-        _anchors.Tick(dt, teacherValid, teacherPos, eyePos, fwd, startForward, startDrop);
-        if (!hadTeacherAnchor && _anchors.HasTeacherAnchor)
-            Debug.Log($"[Anchor] 锁定老师锚点 {_anchors.TeacherAnchor.ToString("F2")}（已确认人体脸）");
-        UpdateDebugMarkers(floorY, teacherVisible);
-
-        if (!_anchors.HasTeacherAnchor || !_anchors.HasViewAnchor) return;
-
-        // ── 仅在锚点变化时重算星路（稳定、不随每帧检测抖动）──
-        if (_anchors.Dirty || !_hasPath)
+        // ── 仅在锚点/老师位置变化时重算星路（稳定、不随每帧检测抖动）──
+        if (_anchors.Dirty || !_hasPath
+            || Vector3.Distance(_teacherAnchor, _pathTeacherAnchor) > 0.02f)
         {
             Vector3 start = _anchors.ViewAnchor;
-            Vector3 end = _anchors.TeacherAnchor;
+            Vector3 end = _teacherAnchor;
             Vector3 dir = new Vector3(end.x - start.x, 0f, end.z - start.z);
             if (dir.sqrMagnitude > 1e-4f)
             {
@@ -365,9 +369,8 @@ public class StardustPath : MonoBehaviour
             }
             _diagStart = _path.p0;
             _diagEnd = _path.p3;
-            // T0：日志里的“老师锚”必须是**锁定的路径锚点**，不是实时低通位置，
-            // 否则会误以为锚点在漂。
-            _diagTeacher = _anchors.TeacherAnchor;
+            _diagTeacher = _teacherAnchor;
+            _pathTeacherAnchor = _teacherAnchor;
             _hasPath = true;
             UpdateCenterLine();
         }
@@ -582,8 +585,9 @@ public class StardustPath : MonoBehaviour
 
         Vector3 mid = (startFlat + endFlat) * 0.5f;
         c2 = mid + side * (sign * lateral);
-        // 中段抬到桌面以上（0.60m），避免从课桌/椅子中穿过；路尾再落到老师脚下
-        c2.y = floorY + 0.60f;
+        // 中段抬到桌面以上（0.85m；2026-11-24 从 0.60 上抬，避免整条路压在画面下缘），
+        // 避免从课桌/椅子中穿过；路尾再落到老师身侧
+        c2.y = floorY + 0.85f;
         // 第一控制点把"画面外"的路头拉进画面
         c1 = Vector3.Lerp(p0, c2, 0.30f) + Vector3.up * 0.25f;
         c1.y = Mathf.Max(c1.y, floorY + 0.15f);
@@ -603,18 +607,18 @@ public class StardustPath : MonoBehaviour
         _centerLine.enabled = IsOn;
     }
 
-    void UpdateDebugMarkers(float floorY, bool teacherVisible)
+    void UpdateDebugMarkers(float floorY)
     {
         if (_teacherMarker == null) return;
-        bool show = showAnchors && _anchors != null && teacherVisible;
+        bool show = showAnchors && _anchors != null;
 
-        bool t = show && _anchors.HasTeacherAnchor;
+        bool t = show && _hasTeacherAnchor;
         _teacherMarker.gameObject.SetActive(t);
         if (_teacherStem != null) _teacherStem.enabled = t;
         if (_teacherRing != null) _teacherRing.enabled = t;
         if (t)
         {
-            Vector3 p = _anchors.TeacherAnchor;
+            Vector3 p = _teacherAnchor;
             _teacherMarker.position = p;
             _teacherMarker.localScale = Vector3.one * anchorMarkerSize;
             _teacherStem.positionCount = 2;

@@ -77,21 +77,21 @@ public class ExperienceSettings : ScriptableObject
     [Tooltip("已废弃：开场不再用假讲话驱动引导；保留字段仅为旧配置兼容")]
     public float startupAttractionSeconds = 25f;
 
-    [Header("首寻 3D 漫游（第一次找到老师前，2026-10-20）")]
-    [Tooltip("开启：首次锁定老师前，精灵绕孩子 360° 真实漫游 + 空间语音吸引注意力")]
+    [Header("首寻 3D 漫游（第一次找到老师前，2026-11-24 用户定调）")]
+    [Tooltip("开启：首次锁定老师前，精灵先在视野中央出现，再在正前方缓慢游走 + 空间语音吸引注意力")]
     public bool firstSearchEnabled = true;
 
-    [Tooltip("漫游速度（米/秒）")]
-    public float firstSearchMoveSpeed = 1.4f;
+    [Tooltip("漫游速度（米/秒）——2026-11-24 从 1.4 降到 0.5：缓慢游走")]
+    public float firstSearchMoveSpeed = 0.5f;
 
-    [Tooltip("漫游半径（米；会按 MRUK 房间边界自动夹紧）")]
-    public float firstSearchRadius = 1.6f;
+    [Tooltip("正前方游走半径（米；0.8~1.2 比较合适，太远画面里太小；会按 MRUK 房间边界自动夹紧）")]
+    public float firstSearchRadius = 1.0f;
 
     [Tooltip("无房间数据时用于估算地板高度的眼高（坐姿约1.1~1.2m；站姿约1.5~1.7m）")]
     public float firstSearchEyeHeight = 1.2f;
 
-    [Tooltip("每个路径点停留时长（秒）")]
-    public float firstSearchHoldSeconds = 0.4f;
+    [Tooltip("每个路径点停留时长（秒）——2026-11-24 从 0.4 增到 0.6，游走更缓")]
+    public float firstSearchHoldSeconds = 0.6f;
 
     [Tooltip("搜索语音间隔（秒）")]
     public float firstSearchVoiceInterval = 4f;
@@ -119,7 +119,35 @@ public class ExperienceSettings : ScriptableObject
     [Tooltip("人脸数据新鲜度：超过这个时间没有新检测结果 → 视为没在看（不累计）")]
     public float faceFreshnessSeconds = 0.8f;
 
-    [Header("流星引导（2026-10-20 交互方案 v2）")]
+    [Header("注意力主流程（2026-11-24 重构；首寻→看老师→指路→奖励）")]
+    [Tooltip("第一次找到老师前，必须连续稳定确认多久（秒）——防止椅子/海报误检就结束首寻")]
+    public float teacherFoundConfirmSeconds = 0.5f;
+
+    [Tooltip("确认老师锚点时的位置稳定半径（米）：检测位置跳动超过此值就重新计时")]
+    public float teacherAnchorStabilityRadius = 0.35f;
+
+    [Tooltip("老师锚点跟随平滑时间（秒）：看到老师时平滑更新，丢失时冻结")]
+    public float teacherAnchorSmoothSeconds = 0.5f;
+
+    [Tooltip("孩子移开视线多久后进入指路（秒）——太短会因眨眼/检测抖动频繁触发")]
+    public float lookAwayGraceSeconds = 0.6f;
+
+    [Tooltip("指路状态下，孩子重新看老师多久算回到看老师（秒）")]
+    public float gazeReturnConfirmSeconds = 0.3f;
+
+    [Tooltip("注视判定进入角（度）：眼睛前向与老师锚点夹角小于此值算看到老师")]
+    public float gazeAngleEnterDegrees = 16f;
+
+    [Tooltip("注视判定退出角（度，滞回）：大于此值算移开视线")]
+    public float gazeAngleExitDegrees = 22f;
+
+    [Tooltip("奖励期间孩子持续移开视线多久，提前收尾庆典并重新指路（秒）")]
+    public float rewardLookAwayGraceSeconds = 0.6f;
+
+    [Tooltip("小精灵在老师脸旁的视口横向偏移（0~0.5）：避免挡住老师脸")]
+    public float spriteSideOffset01 = 0.06f;
+
+    [Header("星星/奖励（2026-10-20 交互方案 v2）")]
     [Tooltip("落一颗星需要的注视秒数（8 颗×2.5s ≈ 20s 集满一圈）")]
     public float meteorStarSeconds = 2.5f;
 
@@ -129,45 +157,12 @@ public class ExperienceSettings : ScriptableObject
     [Tooltip("流星雨 + 跳舞庆典时长（秒）")]
     public float meteorShowerDuration = 6f;
 
-    [Tooltip("流星雨后冷却（秒）：不累计新星星")]
-    public float meteorShowerCooldown = 8f;
-
-    [Tooltip("老师完全离开多久后清空星环（重新开始积累）")]
-    public float meteorRingClearSeconds = 15f;
-
-    [Tooltip("老师丢失/孩子移开视线多久后精灵开始寻找（疑惑）——v9 从 0.8s 放宽到 1.5s，减少话痨")]
-    public float guideConfusedDelay = 1.5f;
-
-    [Tooltip("疑惑阶段时长（秒）：老师去哪里了呢？")]
-    public float guideConfusedSeconds = 1.8f;
-
-    [Tooltip("发现阶段时长（秒）：找到老师了！跟我来～")]
-    public float guideFoundSeconds = 0.9f;
-
-    [Tooltip("带领阶段时长（秒，第 1-2 轮）")]
-    public float guideLeadSeconds = 6f;
-
-    [Tooltip("带领阶段时长（秒，第 3 轮强化版）")]
-    public float guideLeadSecondsRound3 = 8f;
-
-    [Tooltip("引导强化轮数上限（三轮后静默陪伴）")]
-    public int guideMaxRounds = 3;
-
-    [Tooltip("三轮后的静默期（秒）——期间不主动引导")]
-    public float guideSilentSeconds = 15f;
-
-    [Tooltip("成功/静默结束后至少安静多久（秒）再重新引导——v9 降低语音密度")]
-    public float guideRetriggerCooldownSeconds = 10f;
-
     [Header("对话门控（v9）")]
     [Tooltip("外界讲话结束后静默多久才恢复精灵语音（秒）")]
     public float conversationResumeSeconds = 0.5f;
 
     [Tooltip("系统自己的 TTS/音效播放完后，继续忽略 VAD 的尾巴（秒），防止麦克风自听")]
     public float selfAudioTailSeconds = 0.3f;
-
-    [Tooltip("老师多久没被检测到后，隐藏老师锚点/星路（秒）")]
-    public float teacherAnchorTimeoutSeconds = 1.5f;
 
     [Tooltip("锁定老师锚点前，必须在最近多久内检测到属于人体的脸（秒）——防误检到椅子/海报")]
     public float teacherFaceConfirmSeconds = 1.5f;

@@ -1,9 +1,9 @@
 // Assets/Scripts/Core/FirstSearchLogic.cs
-// 首寻 3D 漫游 · 纯逻辑（2026-10-20）：
-// 第一次找到老师前，系统没有老师锚点——精灵绕孩子 360° 真实漫游（可飞出视野），
-// 孩子需要转头/转身跟随空间语音找人；转头过程中相机有机会扫到老师。
-// 路径点按"孩子开始搜索时的位置+朝向"生成，之后不随头转（否则永远在视野内）。
-using System.Collections.Generic;
+// 首寻漫游 · 纯逻辑（2026-11-24 重构）：
+//   第一次找到老师前，精灵先在**视野中央**出现，然后沿一条连续、平滑的路径在
+//   孩子正前方左右游走（不是逐点停顿/瞬移），吸引孩子抬头/转头，进而看到老师。
+//   路径由两条不同频率的正弦叠加：左右摆幅约 ±65°、距离约 1m、眼平上下 ±0.1m；
+//   起点在正前方中央；房间边界仍会夹紧。
 using UnityEngine;
 
 public struct SearchTickResult
@@ -12,93 +12,66 @@ public struct SearchTickResult
     public Vector3 target;
     public bool voiceDue;
     public int voiceSlot;
-    public int waypointIndex;
-    public bool waypointChanged;
 }
 
 public class FirstSearchLogic
 {
     public bool Active { get; private set; }
     public Vector3 CurrentTarget { get; private set; }
-    public int WaypointsVisited { get; private set; }
     public int VoiceCount { get; private set; }
+    public float Elapsed { get; private set; }
 
-    readonly float _moveSpeed, _radius, _holdSeconds, _voiceInterval;
-    readonly List<Vector3> _waypoints = new List<Vector3>();
-    int _index;
-    float _legT, _legDuration, _voiceT;
+    readonly float _baseRadius, _voiceInterval;
+    Vector3 _eyePos, _fwd, _right, _origin;
+    float _floorY;
+    Bounds _room;
+    float _voiceT;
     bool _firstVoicePending;
 
-    public FirstSearchLogic(float moveSpeed = 1.4f, float radius = 1.6f,
-                            float holdSeconds = 0.4f, float voiceInterval = 4f)
+    public FirstSearchLogic(float moveSpeed = 0.5f, float radius = 1.0f,
+                            float holdSeconds = 0.6f, float voiceInterval = 4f)
     {
-        _moveSpeed = Mathf.Max(0.2f, moveSpeed);
-        _radius = Mathf.Max(0.3f, radius);
-        _holdSeconds = Mathf.Max(0f, holdSeconds);
+        // moveSpeed/holdSeconds 保留参数以兼容旧场景资产；连续路径不需要“停顿”。
+        _baseRadius = Mathf.Clamp(radius, 0.45f, 1.6f);
         _voiceInterval = Mathf.Max(0.5f, voiceInterval);
     }
 
     /// <summary>开始搜索。childPos/childForward 是开始瞬间的头位/朝向；floorY=地板高度；room=房间边界。</summary>
     public void Begin(Vector3 childPos, Vector3 childForward, float floorY, Bounds room)
     {
-        _waypoints.Clear();
         Vector3 fwd = new Vector3(childForward.x, 0f, childForward.z);
         if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
         fwd.Normalize();
-        Vector3 right = Vector3.Cross(Vector3.up, fwd).normalized;
-
-        // 绕一圈：前 → 左前 → 左 → 左后 → 后 → 右后 → 右 → 右前
-        float[] angles = { 0f, -45f, -90f, -135f, 180f, 135f, 90f, 45f };
-        float[] radiusMul = { 0.85f, 1.00f, 0.90f, 1.05f, 0.80f, 1.00f, 0.90f, 1.05f };
-        float[] heights = { 1.15f, 0.95f, 1.40f, 1.10f, 1.50f, 1.00f, 1.35f, 1.20f };
-
-        for (int i = 0; i < angles.Length; i++)
-        {
-            float rad = angles[i] * Mathf.Deg2Rad;
-            Vector3 dir = fwd * Mathf.Cos(rad) + right * Mathf.Sin(rad);
-            Vector3 p = childPos + dir * (_radius * radiusMul[i]);
-            p.y = floorY + heights[i];
-            p = ClampToRoom(p, room, floorY);
-            _waypoints.Add(p);
-        }
+        _fwd = fwd;
+        _right = Vector3.Cross(Vector3.up, fwd).normalized;
+        _eyePos = childPos;
+        _origin = new Vector3(childPos.x, floorY, childPos.z);
+        _floorY = floorY;
+        _room = room;
 
         Active = true;
-        _index = 0;
-        CurrentTarget = _waypoints[0];
-        WaypointsVisited = 0;
+        Elapsed = 0f;
         VoiceCount = 0;
-        _legT = 0f;
         _voiceT = 0f;
         _firstVoicePending = true;
-        _legDuration = Mathf.Max(1.2f, Vector3.Distance(childPos, CurrentTarget) / _moveSpeed) + _holdSeconds;
+        CurrentTarget = PathAt(0f);
     }
 
     public SearchTickResult Tick(float dt)
     {
         var res = new SearchTickResult();
         if (!Active) return res;
+        if (dt < 0f) dt = 0f;
 
-        _legT += dt;
-        bool changed = false;
-        // while（而非 if）：大 dt（测试/掉帧）时也能正确追赶路径点
-        int guard = 0;
-        while (_legT >= _legDuration && guard++ < 32)
-        {
-            _legT -= _legDuration;
-            Vector3 prev = _waypoints[_index];
-            _index = (_index + 1) % _waypoints.Count;
-            CurrentTarget = _waypoints[_index];
-            WaypointsVisited++;
-            changed = true;
-            _legDuration = Mathf.Max(1.2f, Vector3.Distance(prev, CurrentTarget) / _moveSpeed) + _holdSeconds;
-        }
+        Elapsed += dt;
+        CurrentTarget = PathAt(Elapsed);
 
-        // 语音节拍：开场句 0.15s 后，之后每 voiceInterval 一句；槽位轮换
+        // 语音节拍：开场句 0.2s 后，之后每 voiceInterval 一句；槽位轮换
         bool due = false;
         _voiceT += dt;
         if (_firstVoicePending)
         {
-            if (_voiceT >= 0.15f) { due = true; _firstVoicePending = false; _voiceT = 0f; }
+            if (_voiceT >= 0.2f) { due = true; _firstVoicePending = false; _voiceT = 0f; }
         }
         else if (_voiceT >= _voiceInterval)
         {
@@ -114,18 +87,31 @@ public class FirstSearchLogic
 
         res.active = true;
         res.target = CurrentTarget;
-        res.waypointIndex = _index;
-        res.waypointChanged = changed;
         return res;
     }
 
-    public void Stop()
+    /// <summary>连续游走路径：t=0 时在正前方中央；左右两条正弦叠加，距离/高度缓慢起伏。</summary>
+    Vector3 PathAt(float t)
     {
-        Active = false;
+        float yaw = (55f * Mathf.Sin(0.32f * t) + 10f * Mathf.Sin(0.71f * t)) * Mathf.Deg2Rad;
+        float radius = _baseRadius * (1f + 0.08f * Mathf.Sin(0.27f * t));
+        float y = _eyePos.y - 0.05f + 0.08f * Mathf.Sin(0.41f * t) + 0.03f * Mathf.Sin(0.90f * t);
+        Vector3 dir = _fwd * Mathf.Cos(yaw) + _right * Mathf.Sin(yaw);
+        Vector3 p = new Vector3(_eyePos.x, y, _eyePos.z) + dir * radius;
+        return ClampToRoom(p, _room, _floorY);
     }
 
-    /// <summary>测试/诊断：漫游路径点（只读副本）。</summary>
-    public Vector3[] PreviewWaypoints() => _waypoints.ToArray();
+    public void Stop() => Active = false;
+
+    /// <summary>测试/诊断：连续路径的采样点（只读）。</summary>
+    public Vector3[] PreviewWaypoints(float duration = 24f, int samples = 16)
+    {
+        int n = Mathf.Max(2, samples);
+        var arr = new Vector3[n];
+        for (int i = 0; i < n; i++)
+            arr[i] = PathAt(duration * i / (n - 1f));
+        return arr;
+    }
 
     static Vector3 ClampToRoom(Vector3 p, Bounds room, float floorY)
     {

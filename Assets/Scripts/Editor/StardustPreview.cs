@@ -80,11 +80,12 @@ public static class StardustPreview
                 mm.SetColor("_BaseColor", new Color(0.95f, 0.45f, 0.25f));
                 marker.GetComponent<MeshRenderer>().sharedMaterial = mm;
 
-                // 重置平滑 → 推进 40 帧让星点稳定
+                // 重置平滑 → 推进 40 帧让星点稳定（老师锚点由预览直接提供）
+                sd.SetTeacherAnchor(c.teacher);
                 sd.SetOn(false);
                 sd.SetOn(true);
                 float t = 0f;
-                for (int i = 0; i < 40; i++) { t += 1f / 30f; sd.Tick(t, 1f / 30f, c.teacher, true); }
+                for (int i = 0; i < 40; i++) { t += 1f / 30f; sd.Tick(t, 1f / 30f); }
                 Shot(cam, Path.Combine(OutDir, c.name + ".png"));
 
                 // 几何诊断：路径中心线到孩子的最近水平距离（越小越可能穿身）

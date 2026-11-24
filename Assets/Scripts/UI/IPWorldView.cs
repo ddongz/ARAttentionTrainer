@@ -40,6 +40,9 @@ public class IPWorldView : MonoBehaviour
     public float sideHint = 1f;
     [Tooltip("驱动推送：目标是否有效——有效=跟随锚定；丢失=冻结防漂移（设计 §4.3 脸可丢方向不丢）")]
     public bool targetValid;
+    [Tooltip("驱动推送：本帧是否有新的人脸检测批次。老师世界锚点只在有新批次时重投影，" +
+             "避免用“旧检测框 + 当前头姿”把锚点拖着跟头走（会导致看着别处也误判在看老师）")]
+    public bool refreshTeacherAnchor = true;
     [Tooltip("驱动推送：老师的视口坐标（最后已知；路标模式下精灵离开了老师，老师锚点单独算）")]
     public float targetX01 = 0.5f, targetY01 = 0.5f;
     [Tooltip("驱动推送：路标模式（引导路激活，精灵飞到孩子面前）——此模式下即使目标丢失也重构精灵锚点")]
@@ -112,6 +115,25 @@ public class IPWorldView : MonoBehaviour
 
     /// <summary>精灵当前的世界位置（平滑后的渲染位置；语音空间定位用）。</summary>
     public Vector3 CurrentWorldPos => _hasRenderPos ? _renderWorldPos : transform.position;
+
+    /// <summary>精灵可视根节点（3D 模型优先，否则 2D 占位贴图）。
+    /// 语音播放器用它做空间跟随：声音始终从精灵所在方位传来。</summary>
+    public Transform VisualTransform
+    {
+        get
+        {
+            if (model3D != null) return model3D.transform;
+            return _renderer != null ? _renderer.transform : transform;
+        }
+    }
+
+    /// <summary>取老师世界锚点（仅当已经真正建立过，不返回精灵位置兜底）。
+    /// 驱动层用它作为"第一次找到老师"的锚点来源。</summary>
+    public bool TryGetTeacherWorldPos(out Vector3 pos)
+    {
+        pos = _teacherPos;
+        return _hasTeacherPos;
+    }
 
     /// <summary>老师相对视野的方位提示点（视口坐标）：按【水平方位角】映射到屏幕边缘方向。
     /// ★2026-10-20 重写（用户实测"方向不对/空间定位没生效"）：
@@ -264,6 +286,7 @@ public class IPWorldView : MonoBehaviour
     Vector2 _prevAnimPos = new Vector2(0.5f, 0.5f);
     int _lastVersion = -1;
     int _lastSegVersion = -1;
+    bool _wasWorldOverride;    // 上一帧是否走世界坐标覆盖（首寻/指路），离开时强制重锚
     bool _everHadValidTarget;
     float _invalidDuration;     // 连续无目标时长（>10s 回到"从未锁过"的跟随语义）
     float _lastDiagTime;
@@ -294,6 +317,40 @@ public class IPWorldView : MonoBehaviour
         float yMax = room.max.y - ceilClearance;
         if (yMax > yMin) p.y = Mathf.Clamp(p.y, yMin, yMax);
         return p;
+    }
+
+    /// <summary>由老师视口坐标反投影出世界锚点。与精灵当前在哪里无关（首寻/指路时也要更新），
+    /// 只依赖 targetValid（驱动层传入的“本帧新鲜检测到老师”）、height01、targetX01/Y01。
+    /// 距离先用身高公式：稳定、无环境射线误命中；后续帧低通平滑。</summary>
+    void UpdateTeacherAnchorFromView(CameraFrame frame)
+    {
+        if (!targetValid || !refreshTeacherAnchor || _camera == null) return;
+
+        float texH = frame.texture != null ? frame.texture.height : 0f;
+        float hPx = height01 * texH;
+        float dist;
+        if (hPx > 8f)
+            dist = Mathf.Clamp(frame.focalLengthPx * assumedPersonHeight / hPx, 0.3f, 8f);
+        else
+            dist = _hasTeacherPos ? Mathf.Max(0.5f, Vector3.Distance(_teacherPos, frame.cameraPose.position))
+                                  : attractDefaultDistance;
+
+        var rayT = _camera.ViewportPointToRay(new Vector2(targetX01, targetY01), frame.cameraPose);
+        Vector3 right = frame.cameraPose.rotation * Vector3.right;
+        Vector3 up = frame.cameraPose.rotation * Vector3.up;
+        Vector3 fwd = frame.cameraPose.rotation * Vector3.forward;
+        Vector3 teacherNew = rayT.origin + rayT.direction * dist
+                          + right * worldOffset.x + up * worldOffset.y + fwd * worldOffset.z;
+        if (mruk != null && mruk.TryGetRoomBounds(out var roomT))
+            teacherNew = ClampToRoom(teacherNew, roomT, roomMargin, floorMinY, ceilClearance);
+
+        // 首个样本直接落位；之后平滑跟随（老师走动/检测抖动）
+        float k = _hasTeacherPos ? 0.35f : 1f;
+        _teacherPos = _hasTeacherPos ? Vector3.Lerp(_teacherPos, teacherNew, k) : teacherNew;
+        _hasTeacherPos = true;
+        _lastTeacherSeenTime = Time.realtimeSinceStartup;
+        _lastDistByHeight = dist;
+        _lastChosenDist = dist;
     }
 
     void LateUpdate()
@@ -333,6 +390,10 @@ public class IPWorldView : MonoBehaviour
             return;
         }
 
+        // 老师世界锚点先独立更新：即使精灵正在走世界覆盖（首寻/指路），
+        // 也不能阻止“第一次找到老师”的锚点建立（否则 AttentionFlowLogic 永远拿不到老师位置）。
+        UpdateTeacherAnchorFromView(frame);
+
         // ── 锚定规则（2026-10-11 重做）──
         bool versionChanged = detector != null && detector.Version != _lastVersion;
         if (versionChanged) _lastVersion = detector.Version;
@@ -351,7 +412,11 @@ public class IPWorldView : MonoBehaviour
             if (_invalidDuration > 10f) _everHadValidTarget = false; // 长期无目标 → 回到吸引模式的跟随语义
         }
         bool anchorable = targetValid || signpostMode || segChanged || !_everHadValidTarget;
-        bool rebuild = !_hasWorldPos || (anchorable && (versionChanged || animMoved || segChanged));
+        bool leftWorldOverride = _wasWorldOverride && !worldOverrideActive && targetValid;
+        _wasWorldOverride = worldOverrideActive;
+        bool rebuild = !_hasWorldPos || leftWorldOverride
+                    || (targetValid && refreshTeacherAnchor) // 新脸批次：精灵锚点跟到最新老师位置
+                    || (anchorable && (versionChanged || animMoved || segChanged));
 
         if (worldOverrideActive)
         {
@@ -426,19 +491,6 @@ public class IPWorldView : MonoBehaviour
             //   5Hz 重建逐次混合，平滑检测噪声；刚重锁（丢失>0.5s）时更缓（0.18）防首帧乱跳。
             float k = _invalidDuration > 0.5f ? 0.18f : 0.45f;
             _lastWorldPos = _hasWorldPos ? Vector3.Lerp(_lastWorldPos, anchorNew, k) : anchorNew;
-
-            // 老师独立锚点（引导路终点）：目标有效时按老师视口坐标算；丢失时保持冻结（同样低通）
-            if (targetValid)
-            {
-                var rayT = _camera.ViewportPointToRay(new Vector2(targetX01, targetY01), frame.cameraPose);
-                Vector3 teacherNew = rayT.origin + rayT.direction * dist
-                              + right * worldOffset.x + up * worldOffset.y + fwd * worldOffset.z;
-                if (mruk != null && mruk.TryGetRoomBounds(out var roomT))
-                    teacherNew = ClampToRoom(teacherNew, roomT, roomMargin, floorMinY, ceilClearance);
-                _teacherPos = _hasTeacherPos ? Vector3.Lerp(_teacherPos, teacherNew, k) : teacherNew;
-                _hasTeacherPos = true;
-                _lastTeacherSeenTime = Time.realtimeSinceStartup;
-            }
 
             _hasWorldPos = true;
         }
@@ -545,7 +597,7 @@ public class IPWorldView : MonoBehaviour
             float modelScale = baseWorldSize * scale / Mathf.Max(0.01f, modelNativeHeight) * fade * danceScale;
             mt.localScale = Vector3.one * Mathf.Max(modelScale, 0.01f);
 
-            if (_stick != null) _stick.SetVisuals(visual, alpha, tint); // 火柴人：姿态+透明度全平滑
+            if (_stick != null) _stick.SetVisuals(visual, alpha, tint, pointing); // 火柴人：姿态+透明度+指路手势
             DriveAnimator(visual);
 
             // "找老师"指向手势：周期触发 Point（2026-10-25：2.8s → 2.2s，指向更明显）

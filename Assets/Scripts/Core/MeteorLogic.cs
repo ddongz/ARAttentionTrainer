@@ -1,9 +1,7 @@
 // Assets/Scripts/Core/MeteorLogic.cs
-// 流星引导 · 纯逻辑层（2026-10-20，可脱离 Unity 运行、测试机/单测直接驱动）：
+// 流星引导 · 几何纯逻辑（2026-11-24：星星进度已并入 AttentionFlowLogic）：
 //   ① 贝塞尔轨迹（流星弧线、星尘路径绕行）
 //   ② 星环槽位（围绕老师的 8 个落星位置）
-//   ③ 星星进度（StarProgressLogic：注视 2.5s/颗 → 8 颗集满 → 流星雨；星星只增不减，
-//      走神不清零；老师长时间（默认 15s）不在才清空星环）
 using UnityEngine;
 
 public static class MeteorLogic
@@ -46,92 +44,5 @@ public static class MeteorLogic
         float sign = sideDot > 0f ? -1f : 1f;
         float extra = Mathf.Max(detour, 0.9f - Mathf.Abs(sideDot)); // 孩子越接近路径，绕行越大
         return mid + side * (sign * extra);
-    }
-}
-
-/// <summary>星星进度事件。</summary>
-public enum StarEvent { None, StarDropped, ShowerTriggered, Cleared }
-
-/// <summary>星星进度（纯逻辑）：注视老师累计 2.5s → 落一颗星；8 颗 → 流星雨。
-/// 星星只增不减（走神不清零）；老师离开超过 clearAfter 秒 → 清空星环（新会话）。</summary>
-public class StarProgressLogic
-{
-    public int LitStars { get; private set; }
-    public int StarsPerRing { get; }
-    public float PerStarSeconds { get; }
-    public float StarProgress01 => Mathf.Clamp01(_sinceStar / PerStarSeconds);
-    public bool InCooldown => _cooldown > 0f;
-
-    float _sinceStar;     // 当前这颗星的注视累计
-    float _cooldown;
-    float _notLookingT;   // 连续未注视时长（用于清空判定）
-    float _notVisibleT;   // 老师连续不在画面内的时长（0.5s 后清空星环）
-
-    readonly float _cooldownSeconds;
-    readonly float _clearAfterSeconds;
-    readonly float _clearWhenInvisibleSeconds;
-
-    public StarProgressLogic(float perStarSeconds = 2.5f, int starsPerRing = 8,
-                             float cooldownSeconds = 8f, float clearAfterSeconds = 15f,
-                             float clearWhenInvisibleSeconds = 0.5f)
-    {
-        PerStarSeconds = Mathf.Max(0.2f, perStarSeconds);
-        StarsPerRing = Mathf.Max(1, starsPerRing);
-        _cooldownSeconds = Mathf.Max(0f, cooldownSeconds);
-        _clearAfterSeconds = Mathf.Max(1f, clearAfterSeconds);
-        _clearWhenInvisibleSeconds = Mathf.Max(0.1f, clearWhenInvisibleSeconds);
-    }
-
-    public void Reset()
-    {
-        LitStars = 0; _sinceStar = 0f; _cooldown = 0f; _notLookingT = 0f; _notVisibleT = 0f;
-    }
-
-    /// <summary>每帧推进。lookingAtTeacher=孩子正在注视老师（检测新鲜 + 视线居中）；
-    /// teacherVisible=老师仍在画面内（targetValid）。老师出画面超过 0.5s → 星环立即清空；
-    /// 只是孩子移开视线、老师仍在画面内 → 星星保留（只增不减）。</summary>
-    public StarEvent Tick(float dt, bool lookingAtTeacher, bool teacherVisible = true)
-    {
-        if (_cooldown > 0f)
-        {
-            _cooldown = Mathf.Max(0f, _cooldown - dt);
-            return StarEvent.None;
-        }
-        if (!teacherVisible)
-        {
-            _notVisibleT += dt;
-            if (_notVisibleT >= _clearWhenInvisibleSeconds && LitStars > 0)
-            {
-                Reset();
-                return StarEvent.Cleared; // 老师出视野 → 星环消失并重置
-            }
-            return StarEvent.None;
-        }
-        _notVisibleT = 0f;
-        if (!lookingAtTeacher)
-        {
-            _notLookingT += dt;
-            if (_notLookingT >= _clearAfterSeconds && LitStars > 0)
-            {
-                Reset();
-                return StarEvent.Cleared; // 老师长时间在画面内但孩子一直没看 → 星环清空（重新开始）
-            }
-            return StarEvent.None;        // 走神：不推进、不衰减（星星只增不减）
-        }
-        _notLookingT = 0f;
-        _sinceStar += dt;
-        if (_sinceStar >= PerStarSeconds)
-        {
-            _sinceStar -= PerStarSeconds;
-            LitStars++;
-            if (LitStars >= StarsPerRing)
-            {
-                LitStars = 0;              // 满环 → 流星雨 → 冷却 → 重新积累
-                _cooldown = _cooldownSeconds;
-                return StarEvent.ShowerTriggered;
-            }
-            return StarEvent.StarDropped;
-        }
-        return StarEvent.None;
     }
 }
